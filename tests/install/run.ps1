@@ -16,22 +16,20 @@ function Pass([string] $Message) {
 }
 
 function Invoke-Installer([hashtable] $Environment, [switch] $ViaIex) {
-  $saved = @{}
-  foreach ($key in $Environment.Keys) {
-    $saved[$key] = [Environment]::GetEnvironmentVariable($key)
-    [Environment]::SetEnvironmentVariable($key, $Environment[$key])
+  # Set the variables inside the child PowerShell itself, so nothing depends on how the parent
+  # process passes its environment on.
+  $setup = foreach ($entry in $Environment.GetEnumerator()) {
+    if ($null -eq $entry.Value) { "Remove-Item -Path 'Env:$($entry.Key)' -ErrorAction SilentlyContinue" }
+    else { "`$env:$($entry.Key) = '$($entry.Value)'" }
   }
-  try {
-    if ($ViaIex) {
-      $command = "Get-Content -Raw -LiteralPath '$installer' | Invoke-Expression"
-      $output = & $pwsh -NoProfile -NonInteractive -Command $command 2>&1 | Out-String
-    } else {
-      $output = & $pwsh -NoProfile -NonInteractive -File $installer 2>&1 | Out-String
-    }
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
-  } finally {
-    foreach ($key in $saved.Keys) { [Environment]::SetEnvironmentVariable($key, $saved[$key]) }
+  if ($ViaIex) {
+    $run = "Get-Content -Raw -LiteralPath '$installer' | Invoke-Expression"
+  } else {
+    $run = "& '$installer'"
   }
+  $command = (@($setup) + $run) -join '; '
+  $output = & $pwsh -NoProfile -NonInteractive -Command $command 2>&1 | Out-String -Width 4096
+  return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
 }
 
 function Assert-Contains($Result, [string] $Text) {
@@ -71,7 +69,8 @@ try {
     }
   }
 
-  $common = @{ SUARA_BASE_URL = $baseUrl; SUARA_DRY_RUN = '1'; PROCESSOR_ARCHITECTURE = 'AMD64'; PROCESSOR_ARCHITEW6432 = $null }
+  # The default runs use the real architecture detection, which must find x64 or arm64.
+  $common = @{ SUARA_BASE_URL = $baseUrl; SUARA_DRY_RUN = '1'; SUARA_ARCH = $null }
 
   $result = Invoke-Installer $common
   if ($result.ExitCode -ne 0) { throw "Dry run failed:`n$($result.Output)" }
@@ -84,14 +83,14 @@ try {
   Pass 'works when piped into Invoke-Expression'
 
   $arm = $common.Clone()
-  $arm.PROCESSOR_ARCHITECTURE = 'ARM64'
+  $arm.SUARA_ARCH = 'arm64'
   $result = Invoke-Installer $arm
   if ($result.ExitCode -ne 0) { throw "ARM64 fallback failed:`n$($result.Output)" }
   Assert-Contains $result $setupName
   Pass 'Windows on Arm falls back to the x64 installer'
 
   $x86 = $common.Clone()
-  $x86.PROCESSOR_ARCHITECTURE = 'x86'
+  $x86.SUARA_ARCH = 'x86'
   $result = Invoke-Installer $x86
   if ($result.ExitCode -eq 0) { throw 'An unsupported architecture should fail.' }
   Assert-Contains $result 'Unsupported processor architecture'

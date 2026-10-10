@@ -41,6 +41,9 @@ jobs:
         env:
           # Ad-hoc signing on macOS until a Developer ID certificate is configured.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # electron-builder skips all signing in pull request builds, which leaves the macOS
+          # app with a broken signature. Ad-hoc signing uses no secrets, so keep it on.
+          CSC_FOR_PULL_REQUEST: 'true'
       - name: Write checksums
         shell: bash
         working-directory: dist

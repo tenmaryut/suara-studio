@@ -14,14 +14,25 @@
     $env:SUARA_VERSION = 'v0.1.0'   Install a specific release instead of the latest
     $env:SUARA_DRY_RUN = '1'        Download and verify only
     $env:SUARA_UNINSTALL = '1'      Remove Suara Studio
+    $env:SUARA_ARCH = 'x64'         Install the build for this architecture (x64 or arm64)
 #>
 
 function Get-SuaraArchitecture {
-  $arch = $env:PROCESSOR_ARCHITEW6432
+  # SUARA_ARCH overrides detection, e.g. to install the x64 build on Windows on Arm.
+  $arch = $env:SUARA_ARCH
+  if (-not $arch) {
+    try {
+      # The operating system's architecture, even when this PowerShell runs as a 32-bit process.
+      $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    } catch {
+      $arch = $null
+    }
+  }
+  if (-not $arch) { $arch = $env:PROCESSOR_ARCHITEW6432 }
   if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
   switch ($arch) {
-    'AMD64' { return 'x64' }
-    'ARM64' { return 'arm64' }
+    { $_ -in 'x64', 'AMD64' } { return 'x64' }
+    { $_ -in 'arm64' } { return 'arm64' }
     default { throw "Unsupported processor architecture: $arch" }
   }
 }
