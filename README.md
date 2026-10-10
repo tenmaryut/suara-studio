@@ -91,13 +91,17 @@ The install scripts do this check for you, and stop if any file does not match.
 ### About unsigned builds
 
 The installers are not yet signed with an Apple or Microsoft certificate. The install commands
-above are not affected. If you download an installer with a browser instead:
+above avoid the prompts below, which only appear if you download an installer with a browser:
 
 - **macOS:** the first time you open the app, macOS blocks it. Choose **Done**, open
   **System Settings** → **Privacy & Security**, and choose **Open Anyway** next to the message about
   Suara Studio. If macOS says the app "is damaged", run
   `xattr -dr com.apple.quarantine "/Applications/Suara Studio.app"` and open it again.
 - **Windows:** if SmartScreen appears, choose **More info**, then **Run anyway**.
+
+On Windows 11, **Smart App Control** blocks unsigned apps however they are installed, and it has no
+exception for a single app. To use Suara Studio, turn it off in **Windows Security** →
+**App & browser control** → **Smart App Control settings**.
 
 A step-by-step guide in Indonesian covers every system:
 [docs/panduan-unduh.md](docs/panduan-unduh.md).

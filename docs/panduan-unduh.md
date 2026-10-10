@@ -33,8 +33,9 @@ audio, mikrofon tidak diperlukan.
 ## Cara 1: Pasang dengan satu perintah (disarankan)
 
 Cara ini paling mudah. Satu perintah akan memilih file yang cocok untuk komputer Anda, memeriksa
-keasliannya, lalu memasang Suara Studio. Peringatan keamanan dari Windows atau macOS juga tidak
-muncul dengan cara ini.
+keasliannya, lalu memasang Suara Studio. Peringatan SmartScreen di Windows dan Gatekeeper di macOS
+juga tidak muncul dengan cara ini. Pengecualiannya adalah Smart App Control di Windows 11, yang
+dijelaskan di bagian [Mengatasi masalah](#mengatasi-masalah).
 
 Pesan selama pemasangan berbahasa Inggris. Itu normal.
 
@@ -319,6 +320,14 @@ instalasi di jendela PowerShell yang sama:
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 ```
+
+**Windows 11 memblokir Suara Studio dengan pesan dari Smart App Control.**
+Smart App Control memblokir aplikasi yang belum ditandatangani secara digital, termasuk Suara Studio
+saat ini, dan tidak bisa memberi pengecualian untuk satu aplikasi saja. Jika ingin tetap memakai
+Suara Studio, matikan fitur ini di **Windows Security** → **App & browser control** →
+**Smart App Control settings**. Sejak pembaruan Windows 11 bulan April 2026, fitur ini bisa
+dinyalakan lagi kapan saja. Di Windows yang belum mendapat pembaruan itu, Smart App Control yang
+sudah dimatikan hanya bisa dinyalakan lagi dengan memasang ulang Windows.
 
 **Rekaman tidak bisa dimulai atau mikrofon tidak terdeteksi.**
 Periksa [izin mikrofon](#izin-mikrofon), pastikan mikrofon sudah tersambung, lalu pilih mikrofon
