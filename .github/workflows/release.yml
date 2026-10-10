@@ -1,11 +1,15 @@
 name: Release
 
-# Push a tag like v0.1.0 (matching package.json) to build every installer and create a
-# draft GitHub Release with the installers, install scripts and SHA256SUMS.txt.
+# Builds every installer and creates a draft GitHub Release with the installers, install scripts
+# and SHA256SUMS.txt. Start it in either of two ways:
+# - Actions > Release > Run workflow on main. It releases the version in package.json and
+#   creates the tag (v + version) on that commit.
+# - Push a tag like v0.1.0 that matches package.json.
 # Review the draft on GitHub, then press "Publish release".
 on:
   push:
     tags: ['v*.*.*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,12 +21,31 @@ jobs:
   verify:
     name: Check version
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
       - name: Tag, package.json and CHANGELOG agree
+        id: version
         run: |
           version="$(node -p "require('./package.json').version")"
-          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+          tag="v$version"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            if [ "$GITHUB_REF" != refs/heads/main ]; then
+              echo "::error::Run the release from the main branch, not $GITHUB_REF_NAME"
+              exit 1
+            fi
+            # Running again for the same commit is fine; a tag on another commit means the
+            # version in package.json was not bumped.
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+              git fetch --quiet --depth=1 origin "refs/tags/$tag:refs/tags/$tag"
+              if [ "$(git rev-parse "$tag^{commit}")" != "$GITHUB_SHA" ]; then
+                echo "::error::Tag $tag already exists on another commit. Bump the version in package.json first."
+                exit 1
+              fi
+            fi
+          elif [ "$GITHUB_REF_NAME" != "$tag" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
             exit 1
           fi
@@ -30,6 +53,8 @@ jobs:
             echo "::error::CHANGELOG.md has no '## [$version]' section"
             exit 1
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   package:
     name: Package
@@ -38,10 +63,13 @@ jobs:
 
   publish:
     name: Create draft release
-    needs: package
+    needs: [verify, package]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      TAG: ${{ needs.verify.outputs.tag }}
+      VERSION: ${{ needs.verify.outputs.version }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v7
@@ -57,8 +85,7 @@ jobs:
           cat SHA256SUMS.txt
       - name: Write release notes
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          awk -v heading="## [$version]" '
+          awk -v heading="## [$VERSION]" '
             index($0, heading) == 1 { found = 1; next }
             found && /^## \[/ { exit }
             found { print }
@@ -86,11 +113,22 @@ jobs:
           Panduan unduh dan pasang dalam Bahasa Indonesia: [docs/panduan-unduh.md](https://github.com/tenmaryut/suara-studio/blob/main/docs/panduan-unduh.md)
           EOF
           cat notes.md
+      - name: Create the tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # A tag created with the workflow token does not start this workflow again.
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null
+            echo "Created tag $TAG on $GITHUB_SHA"
+          fi
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          flags=(--draft --verify-tag --title "Suara Studio $GITHUB_REF_NAME" --notes-file notes.md)
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" release/* "${flags[@]}"
+          flags=(--draft --verify-tag --title "Suara Studio $TAG" --notes-file notes.md)
+          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" release/* "${flags[@]}"

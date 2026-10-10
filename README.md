@@ -153,7 +153,9 @@ on Electron or the browser, so its unit tests run in plain Node.
 
 1. Set the new version in `package.json` (`npm version 0.2.0 --no-git-tag-version`) and describe the
    changes under a `## [0.2.0]` heading in [CHANGELOG.md](CHANGELOG.md).
-2. Merge to `main`, then tag the commit and push the tag:
+2. Merge to `main`. On GitHub, open **Actions** → **Release** → **Run workflow**, and run it on
+   `main`. The workflow creates the tag `v0.2.0` for the version in `package.json`. If you prefer
+   git, you can push the tag yourself instead:
 
    ```sh
    git tag v0.2.0
