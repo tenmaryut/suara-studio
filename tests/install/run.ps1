@@ -28,6 +28,9 @@ function Invoke-Installer([hashtable] $Environment, [switch] $ViaIex) {
     $run = "& '$installer'"
   }
   $command = (@($setup) + $run) -join '; '
+  # Windows PowerShell 5.1 turns redirected stderr lines into terminating errors under 'Stop',
+  # and the failure tests expect the installer to write its error there.
+  $ErrorActionPreference = 'Continue'
   $output = & $pwsh -NoProfile -NonInteractive -Command $command 2>&1 | Out-String -Width 4096
   return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
 }
@@ -107,3 +110,5 @@ try {
 }
 
 Write-Host "$($script:count) PowerShell installer tests passed"
+# The last installer run failed on purpose; don't let its exit code become the result.
+exit 0
