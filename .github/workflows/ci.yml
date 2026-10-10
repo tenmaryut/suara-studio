@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, types and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: End-to-end tests
+        run: xvfb-run -a npm run test:e2e
+      - name: ShellCheck
+        run: shellcheck scripts/install.sh tests/install/run.sh
+      - name: Installer script tests
+        run: sh tests/install/run.sh
+
+  installer-scripts:
+    name: Installer scripts (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - name: install.sh tests
+        if: runner.os == 'macOS'
+        run: sh tests/install/run.sh
+      - name: install.ps1 tests (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/install/run.ps1
+      - name: install.ps1 tests (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/install/run.ps1
+
+  package:
+    name: Package
+    needs: check
+    uses: ./.github/workflows/package.yml

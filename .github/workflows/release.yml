@@ -1,0 +1,96 @@
+name: Release
+
+# Push a tag like v0.1.0 (matching package.json) to build every installer and create a
+# draft GitHub Release with the installers, install scripts and SHA256SUMS.txt.
+# Review the draft on GitHub, then press "Publish release".
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  verify:
+    name: Check version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Tag, package.json and CHANGELOG agree
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section"
+            exit 1
+          fi
+
+  package:
+    name: Package
+    needs: verify
+    uses: ./.github/workflows/package.yml
+
+  publish:
+    name: Create draft release
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: installers-*
+          path: release
+          merge-multiple: true
+      - name: Add install scripts and checksums
+        working-directory: release
+        run: |
+          cp ../scripts/install.sh ../scripts/install.ps1 .
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Write release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          cat >> notes.md <<'EOF'
+
+          ## Install
+
+          **macOS and Linux**
+
+          ```sh
+          curl -fsSL https://github.com/tenmaryut/suara-studio/releases/latest/download/install.sh | sh
+          ```
+
+          **Windows (PowerShell)**
+
+          ```powershell
+          irm https://github.com/tenmaryut/suara-studio/releases/latest/download/install.ps1 | iex
+          ```
+
+          The scripts check every download against `SHA256SUMS.txt`. You can also download an installer below;
+          the [README](https://github.com/tenmaryut/suara-studio#about-unsigned-builds) explains the one-time
+          security prompt on macOS and Windows.
+
+          Panduan unduh dan pasang dalam Bahasa Indonesia: [docs/panduan-unduh.md](https://github.com/tenmaryut/suara-studio/blob/main/docs/panduan-unduh.md)
+          EOF
+          cat notes.md
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=(--draft --verify-tag --title "Suara Studio $GITHUB_REF_NAME" --notes-file notes.md)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" release/* "${flags[@]}"

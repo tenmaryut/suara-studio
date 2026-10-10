@@ -1,0 +1,57 @@
+{
+  "name": "suara-studio",
+  "productName": "Suara Studio",
+  "version": "0.1.0",
+  "description": "Record and edit audio in one desktop app for Windows, macOS and Linux.",
+  "desktopName": "suara-studio.desktop",
+  "license": "MIT",
+  "author": {
+    "name": "tenmaryut",
+    "url": "https://github.com/tenmaryut"
+  },
+  "homepage": "https://github.com/tenmaryut/suara-studio",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tenmaryut/suara-studio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tenmaryut/suara-studio/issues"
+  },
+  "main": "out/main/index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:install": "sh tests/install/run.sh",
+    "dist": "npm run build && electron-builder --publish never",
+    "dist:win": "npm run build && electron-builder --win --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "dist:linux": "npm run build && electron-builder --linux --publish never",
+    "icons": "node scripts/make-icon.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.64.0",
+    "@resvg/resvg-js": "2.6.2",
+    "@types/node": "24.19.2",
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "eslint": "10.12.0",
+    "globals": "17.13.0",
+    "lucide": "1.55.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.1",
+    "vite": "7.3.7",
+    "vitest": "5.0.3",
+    "wavesurfer.js": "8.0.2"
+  }
+}
