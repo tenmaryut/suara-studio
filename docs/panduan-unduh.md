@@ -296,8 +296,8 @@ File rekaman yang sudah Anda simpan tidak ikut terhapus.
 
 ## Mengatasi masalah
 
-**Muncul pesan `could not find a published release of Suara Studio`.**
-Belum ada versi yang diterbitkan. Cek
+**Muncul pesan `404`, `Not Found`, atau `could not find a published release of Suara Studio`.**
+Belum ada versi Suara Studio yang diterbitkan, jadi file instalasinya belum tersedia. Cek
 [halaman rilis](https://github.com/tenmaryut/suara-studio/releases), lalu coba lagi setelah rilis
 tersedia.
 
@@ -313,12 +313,23 @@ Pasang `curl` terlebih dahulu (`sudo apt install curl`), atau gunakan `wget`:
 wget -qO- https://github.com/tenmaryut/suara-studio/releases/latest/download/install.sh | sh
 ```
 
-**Di Windows muncul `Could not create SSL/TLS secure channel`.**
-Ini terjadi di Windows lama yang belum diperbarui. Jalankan baris berikut, lalu ulangi perintah
-instalasi di jendela PowerShell yang sama:
+**Di Windows muncul `Could not create SSL/TLS secure channel`, `The underlying connection was closed`,
+atau `The connection was closed unexpectedly`.**
+Sambungan ke GitHub terputus sebelum unduhan dimulai. Pertama, pastikan Windows PowerShell memakai
+TLS 1.2, yang diwajibkan GitHub. Jalankan baris berikut, lalu ulangi perintah instalasi di jendela
+PowerShell yang sama:
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+```
+
+Jika masih gagal, sambungannya kemungkinan diputus di tengah jalan oleh jaringan, VPN, proxy, atau
+antivirus yang memeriksa koneksi HTTPS. Coba dari jaringan lain, misalnya hotspot ponsel. Untuk
+memeriksa apakah PowerShell bisa terhubung ke GitHub, jalankan perintah berikut. Jika sambungannya
+baik, hasilnya `200`:
+
+```powershell
+(Invoke-WebRequest -UseBasicParsing https://github.com/tenmaryut/suara-studio).StatusCode
 ```
 
 **Windows 11 memblokir Suara Studio dengan pesan dari Smart App Control.**
