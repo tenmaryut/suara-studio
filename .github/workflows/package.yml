@@ -1,0 +1,116 @@
+name: Package
+
+# Builds the installers on each OS, installs them with the install scripts and starts the
+# installed app. Called by CI for every change and by the release workflow for tags.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-24.04
+            builder: --linux
+          - name: macOS
+            runner: macos-latest
+            builder: --mac
+          - name: Windows
+            runner: windows-latest
+            builder: --win
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install rpm tooling
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y rpm
+      - run: npm ci
+      - run: npm run build
+      - name: Build installers
+        run: npx electron-builder ${{ matrix.builder }} --publish never
+        env:
+          # Ad-hoc signing on macOS until a Developer ID certificate is configured.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Write checksums
+        shell: bash
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          files=(*.exe *.zip *.dmg *.AppImage *.deb *.rpm *.tar.gz)
+          if command -v sha256sum >/dev/null; then sha256sum "${files[@]}"; else shasum -a 256 "${files[@]}"; fi > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Install and start (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          export SUARA_BASE_URL="file://$PWD/dist"
+          sh scripts/install.sh --method tarball --prefix "$RUNNER_TEMP/prefix"
+          test -x "$RUNNER_TEMP/prefix/share/suara-studio/app/suara-studio"
+          sh scripts/install.sh --method deb
+          test -x "/opt/Suara Studio/suara-studio"
+          SUARA_EXECUTABLE="/opt/Suara Studio/suara-studio" xvfb-run -a npx playwright test tests/e2e/packaged.spec.ts
+          sh scripts/install.sh --uninstall --prefix "$RUNNER_TEMP/prefix"
+          test ! -e "/opt/Suara Studio/suara-studio"
+          test ! -e "$RUNNER_TEMP/prefix/bin/suara-studio"
+
+      - name: Install and start (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          export SUARA_BASE_URL="file://$PWD/dist"
+          apps="$RUNNER_TEMP/Applications"
+          mkdir -p "$apps"
+          sh scripts/install.sh --app-dir "$apps"
+          codesign --verify --deep --verbose=2 "$apps/Suara Studio.app"
+          SUARA_EXECUTABLE="$apps/Suara Studio.app/Contents/MacOS/Suara Studio" npx playwright test tests/e2e/packaged.spec.ts
+          sh scripts/install.sh --uninstall --app-dir "$apps"
+          test ! -e "$apps/Suara Studio.app"
+
+      - name: Install and start (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $port = 8765
+          $server = Start-Process python -PassThru -WindowStyle Hidden `
+            -ArgumentList '-m', 'http.server', "$port", '--bind', '127.0.0.1', '--directory', 'dist'
+          try {
+            Start-Sleep -Seconds 2
+            $env:SUARA_BASE_URL = "http://127.0.0.1:$port"
+            ./scripts/install.ps1
+            $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Suara Studio.exe' | Select-Object -First 1
+            if (-not $exe) { throw 'Suara Studio.exe was not installed' }
+            $env:SUARA_EXECUTABLE = $exe.FullName
+            npx playwright test tests/e2e/packaged.spec.ts
+            if ($LASTEXITCODE -ne 0) { throw 'The installed app failed its smoke test' }
+            $env:SUARA_UNINSTALL = '1'
+            ./scripts/install.ps1
+            # The NSIS uninstaller finishes in the background; give it a moment.
+            $deadline = (Get-Date).AddSeconds(60)
+            while ((Test-Path $exe.FullName) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            if (Test-Path $exe.FullName) { throw 'Suara Studio.exe was not removed' }
+          }
+          finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installers-${{ runner.os }}
+          if-no-files-found: error
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
