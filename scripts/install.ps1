@@ -30,9 +30,13 @@ function Get-SuaraReleaseUrl {
   param([string] $Repo, [string] $Version, [string] $BaseUrl)
   if ($BaseUrl) { return $BaseUrl.TrimEnd('/') }
   if (-not $Version) {
-    $release = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$Repo/releases/latest" `
-      -Headers @{ 'User-Agent' = 'suara-studio-installer'; 'Accept' = 'application/vnd.github+json' }
-    $Version = $release.tag_name
+    try {
+      $release = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$Repo/releases/latest" `
+        -Headers @{ 'User-Agent' = 'suara-studio-installer'; 'Accept' = 'application/vnd.github+json' }
+      $Version = $release.tag_name
+    } catch {
+      $Version = $null
+    }
     if (-not $Version) { throw 'Could not find a published release of Suara Studio.' }
   }
   if (-not $Version.StartsWith('v')) { $Version = "v$Version" }

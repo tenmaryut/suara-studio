@@ -148,7 +148,7 @@ download() {
 latest_tag() {
   if has curl; then
     # GitHub redirects /releases/latest to /releases/tag/<tag>; no API quota needed.
-    url=$(curl -fsSLI --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest") || return 1
+    url=$(curl -fsSLI --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null) || return 1
     tag=${url##*/}
   else
     download "https://api.github.com/repos/$REPO/releases/latest" "$TMP_DIR/release.json" || return 1
