@@ -79,7 +79,11 @@ jobs:
           irm https://github.com/tenmaryut/suara-studio/releases/latest/download/install.ps1 | iex
           ```
 
-          The scripts check every download against `SHA256SUMS.txt`. You can also download an installer below.
+          The scripts check every download against `SHA256SUMS.txt`. You can also download an installer below;
+          the [README](https://github.com/tenmaryut/suara-studio#about-unsigned-builds) explains the one-time
+          security prompt on macOS and Windows.
+
+          Panduan unduh dan pasang dalam Bahasa Indonesia: [docs/panduan-unduh.md](https://github.com/tenmaryut/suara-studio/blob/main/docs/panduan-unduh.md)
           EOF
           cat notes.md
       - name: Create the draft release

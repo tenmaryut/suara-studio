@@ -45,6 +45,7 @@ npm run dist:linux               # installers into dist/ (dist:mac, dist:win on 
   so they never take keystrokes away from text fields.
 - Release asset names are matched by the install scripts (`-mac-<arch>.zip`, `_amd64.deb`,
   `.x86_64.rpm`, `-linux-x64.tar.gz`, `-win-x64-setup.exe`). Change `electron-builder.yml` and the
-  scripts together.
+  scripts together, and update the file names in `docs/panduan-unduh.md` (the Indonesian download
+  guide) and the install steps in `README.md`.
 - Releases: bump `package.json`, add a `## [x.y.z]` section to `CHANGELOG.md`, push tag `vx.y.z`.
   The release workflow creates a draft release that a maintainer publishes.

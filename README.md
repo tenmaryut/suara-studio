@@ -93,8 +93,14 @@ The install scripts do this check for you, and stop if any file does not match.
 The installers are not yet signed with an Apple or Microsoft certificate. The install commands
 above are not affected. If you download an installer with a browser instead:
 
-- **macOS:** the first time, right-click the app and choose **Open**.
+- **macOS:** the first time you open the app, macOS blocks it. Choose **Done**, open
+  **System Settings** → **Privacy & Security**, and choose **Open Anyway** next to the message about
+  Suara Studio. If macOS says the app "is damaged", run
+  `xattr -dr com.apple.quarantine "/Applications/Suara Studio.app"` and open it again.
 - **Windows:** if SmartScreen appears, choose **More info**, then **Run anyway**.
+
+A step-by-step guide in Indonesian covers every system:
+[docs/panduan-unduh.md](docs/panduan-unduh.md).
 
 ## Keyboard shortcuts
 
@@ -175,6 +181,9 @@ Suara Studio adalah aplikasi untuk merekam dan mengedit audio di Windows, macOS,
   ```powershell
   irm https://github.com/tenmaryut/suara-studio/releases/latest/download/install.ps1 | iex
   ```
+
+Panduan lengkap langkah demi langkah, termasuk unduhan manual, izin mikrofon, dan cara mengatasi
+masalah, ada di **[Panduan Unduh dan Pasang](docs/panduan-unduh.md)**.
 
 Skrip instalasi selalu memeriksa setiap file dengan `SHA256SUMS.txt` sebelum memasang. Untuk
 menghapus aplikasi, tambahkan `--uninstall` di macOS/Linux
