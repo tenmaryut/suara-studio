@@ -2,14 +2,19 @@ import type { Translate } from '../../../shared/i18n'
 import { type WavFormat, WAV_FORMATS } from '../audio/wav'
 import { h } from './dom'
 
-export interface NumberPrompt {
+export interface ExportChoice {
+  format: WavFormat
+  preventClipping: boolean
+}
+
+export interface HelpSection {
   title: string
-  label: string
-  help: string
-  value: number
-  min: number
-  max: number
-  step: number
+  text: string
+}
+
+export interface ShortcutHelp {
+  keys: string
+  action: string
 }
 
 /** In-app modal dialogs built on <dialog>, so they follow the app language and theme. */
@@ -23,42 +28,8 @@ export class Dialogs {
     return this.root.querySelector('dialog[open]') !== null
   }
 
-  promptNumber(prompt: NumberPrompt): Promise<number | null> {
-    const input = h('input', {
-      type: 'number',
-      class: 'input',
-      value: prompt.value,
-      min: prompt.min,
-      max: prompt.max,
-      step: prompt.step,
-      required: true,
-      id: 'dialog-number'
-    })
-    const error = h('p', { class: 'dialog-error', hidden: true, role: 'alert' })
-    return this.open<number>(
-      prompt.title,
-      [
-        h('label', { class: 'field-label', for: 'dialog-number' }, prompt.label),
-        input,
-        h('p', { class: 'dialog-help' }, prompt.help),
-        error
-      ],
-      () => {
-        const value = Number(input.value)
-        if (input.value.trim() === '' || !Number.isFinite(value) || value < prompt.min || value > prompt.max) {
-          error.textContent = this.t('dialog.invalidNumber', { min: prompt.min, max: prompt.max })
-          error.hidden = false
-          input.focus()
-          return undefined
-        }
-        return value
-      },
-      this.t('dialog.apply'),
-      input
-    )
-  }
-
-  chooseWavFormat(current: WavFormat): Promise<WavFormat | null> {
+  /** Asks how to export the merged layers: WAV format and clipping protection. */
+  chooseExport(current: WavFormat, summary: string): Promise<ExportChoice | null> {
     const options = WAV_FORMATS.map((format) => {
       const radio = h('input', {
         type: 'radio',
@@ -74,16 +45,56 @@ export class Dialogs {
       h('legend', { class: 'field-label' }, this.t('dialog.export.format')),
       ...options
     )
-    return this.open<WavFormat>(
+    const protect = h('input', { type: 'checkbox', checked: true, id: 'dialog-protect' })
+    return this.open<ExportChoice>(
       this.t('dialog.export.title'),
-      [fieldset],
+      [
+        h('p', { class: 'dialog-help', 'data-testid': 'export-summary' }, summary),
+        fieldset,
+        h(
+          'label',
+          { class: 'check', for: 'dialog-protect' },
+          protect,
+          h('span', {}, this.t('dialog.export.protect'))
+        )
+      ],
       () => {
         const checked = fieldset.querySelector<HTMLInputElement>('input[name="wav-format"]:checked')
-        return (checked?.value as WavFormat | undefined) ?? current
+        return { format: (checked?.value as WavFormat | undefined) ?? current, preventClipping: protect.checked }
       },
       this.t('dialog.export.continue'),
       fieldset.querySelector<HTMLInputElement>('input:checked') ?? undefined
     )
+  }
+
+  /** The "How to use" guide with keyboard shortcuts. */
+  showHelp(title: string, sections: HelpSection[], shortcuts: ShortcutHelp[]): Promise<void> {
+    const steps = h(
+      'ol',
+      { class: 'help-steps' },
+      ...sections.map((section) =>
+        h('li', {}, h('strong', {}, section.title), h('span', {}, section.text))
+      )
+    )
+    const table = h(
+      'table',
+      { class: 'help-shortcuts' },
+      h(
+        'tbody',
+        {},
+        ...shortcuts.map((shortcut) =>
+          h('tr', {}, h('td', {}, h('kbd', {}, shortcut.keys)), h('td', {}, shortcut.action))
+        )
+      )
+    )
+    return this.open<true>(
+      title,
+      [steps, h('h3', { class: 'help-subtitle' }, this.t('help.shortcuts')), table],
+      () => true,
+      this.t('help.close'),
+      undefined,
+      { wide: true, cancel: false }
+    ).then(() => undefined)
   }
 
   private open<T>(
@@ -91,7 +102,8 @@ export class Dialogs {
     body: Node[],
     submit: () => T | undefined,
     submitLabel: string,
-    focusTarget?: HTMLElement
+    focusTarget?: HTMLElement,
+    options: { wide?: boolean; cancel?: boolean } = {}
   ): Promise<T | null> {
     return new Promise((resolve) => {
       const cancel = h('button', { type: 'button', class: 'btn' }, this.t('dialog.cancel'))
@@ -101,9 +113,9 @@ export class Dialogs {
         { method: 'dialog', class: 'dialog-body', novalidate: true },
         h('h2', { class: 'dialog-title' }, title),
         ...body,
-        h('div', { class: 'dialog-actions' }, cancel, confirm)
+        h('div', { class: 'dialog-actions' }, options.cancel === false ? null : cancel, confirm)
       )
-      const dialog = h('dialog', { class: 'dialog', 'aria-label': title }, form)
+      const dialog = h('dialog', { class: options.wide ? 'dialog dialog-wide' : 'dialog', 'aria-label': title }, form)
       let settled = false
       const finish = (value: T | null): void => {
         if (settled) return
@@ -124,8 +136,8 @@ export class Dialogs {
       })
       this.root.append(dialog)
       dialog.showModal()
-      ;(focusTarget ?? confirm).focus()
-      if (focusTarget instanceof HTMLInputElement && focusTarget.type === 'number') focusTarget.select()
+      ;(focusTarget ?? confirm).focus({ preventScroll: true })
+      dialog.scrollTop = 0
     })
   }
 }

@@ -115,17 +115,17 @@ perintah instalasi biasa lagi, buka jendela PowerShell baru.
 
 1. Buka halaman rilis terbaru:
    <https://github.com/tenmaryut/suara-studio/releases/latest>
-2. Di bagian **Assets**, unduh file yang sesuai dengan komputer Anda. Bagian `0.1.0` di nama file
+2. Di bagian **Assets**, unduh file yang sesuai dengan komputer Anda. Bagian `0.2.0` di nama file
    adalah nomor versi, jadi bisa berbeda.
 
    | Komputer Anda | File yang diunduh |
    | --- | --- |
-   | Windows | `suara-studio-0.1.0-win-x64-setup.exe` |
-   | Mac dengan Apple Silicon (M1 dan sesudahnya) | `suara-studio-0.1.0-mac-arm64.dmg` |
-   | Mac dengan prosesor Intel | `suara-studio-0.1.0-mac-x64.dmg` |
-   | Ubuntu, Debian, Linux Mint | `suara-studio_0.1.0_amd64.deb` |
-   | Fedora, openSUSE | `suara-studio-0.1.0.x86_64.rpm` |
-   | Distribusi Linux lain | `suara-studio-0.1.0-linux-x86_64.AppImage` |
+   | Windows | `suara-studio-0.2.0-win-x64-setup.exe` |
+   | Mac dengan Apple Silicon (M1 dan sesudahnya) | `suara-studio-0.2.0-mac-arm64.dmg` |
+   | Mac dengan prosesor Intel | `suara-studio-0.2.0-mac-x64.dmg` |
+   | Ubuntu, Debian, Linux Mint | `suara-studio_0.2.0_amd64.deb` |
+   | Fedora, openSUSE | `suara-studio-0.2.0.x86_64.rpm` |
+   | Distribusi Linux lain | `suara-studio-0.2.0-linux-x86_64.AppImage` |
 
    Tidak tahu jenis Mac Anda? Klik logo Apple di pojok kiri atas layar, lalu pilih
    **About This Mac**. Jika ada baris **Chip** bertuliskan Apple M1, M2, dan seterusnya, pilih
@@ -172,7 +172,7 @@ Buka Terminal, lalu jalankan:
 
 ```sh
 cd ~/Downloads
-sudo apt install ./suara-studio_0.1.0_amd64.deb
+sudo apt install ./suara-studio_0.2.0_amd64.deb
 ```
 
 Pesan `Download is performed unsandboxed as root` yang mungkin muncul aman diabaikan.
@@ -183,14 +183,14 @@ Di Fedora:
 
 ```sh
 cd ~/Downloads
-sudo dnf install ./suara-studio-0.1.0.x86_64.rpm
+sudo dnf install ./suara-studio-0.2.0.x86_64.rpm
 ```
 
 Di openSUSE:
 
 ```sh
 cd ~/Downloads
-sudo zypper install --allow-unsigned-rpm ./suara-studio-0.1.0.x86_64.rpm
+sudo zypper install --allow-unsigned-rpm ./suara-studio-0.2.0.x86_64.rpm
 ```
 
 ### Linux lainnya (.AppImage)
@@ -199,8 +199,8 @@ AppImage bisa langsung dijalankan tanpa dipasang:
 
 ```sh
 cd ~/Downloads
-chmod +x suara-studio-0.1.0-linux-x86_64.AppImage
-./suara-studio-0.1.0-linux-x86_64.AppImage
+chmod +x suara-studio-0.2.0-linux-x86_64.AppImage
+./suara-studio-0.2.0-linux-x86_64.AppImage
 ```
 
 AppImage memerlukan FUSE versi 2 (paket `libfuse2`). Jika AppImage tidak mau berjalan, pakai
@@ -221,7 +221,7 @@ di folder itu:
 
   ```powershell
   cd ~\Downloads
-  (Get-FileHash .\suara-studio-0.1.0-win-x64-setup.exe -Algorithm SHA256).Hash
+  (Get-FileHash .\suara-studio-0.2.0-win-x64-setup.exe -Algorithm SHA256).Hash
   ```
 
   Bandingkan hasilnya dengan baris berisi nama file yang sama di `SHA256SUMS.txt`. Perbedaan huruf
@@ -231,7 +231,7 @@ di folder itu:
 
   ```sh
   cd ~/Downloads
-  shasum -a 256 suara-studio-0.1.0-mac-arm64.dmg
+  shasum -a 256 suara-studio-0.2.0-mac-arm64.dmg
   ```
 
   Bandingkan hasilnya dengan baris berisi nama file yang sama di `SHA256SUMS.txt`.

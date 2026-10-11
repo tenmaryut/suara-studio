@@ -19,6 +19,7 @@ import {
   type AppInfo,
   type DiscardChoice,
   type DocumentState,
+  type FileKind,
   IpcChannel,
   type MenuCommand,
   type MicAccess,
@@ -33,7 +34,9 @@ import { isAppUrl, registerAppScheme, serveRenderer } from './protocol'
 import { fetchLatestRelease } from './updates'
 
 const APP_USER_MODEL_ID = 'io.github.tenmaryut.suarastudio'
-const OPENABLE_EXTENSIONS = ['wav', 'wave', 'mp3', 'm4a', 'aac', 'mp4', 'flac', 'ogg', 'oga', 'opus', 'webm']
+const AUDIO_EXTENSIONS = ['wav', 'wave', 'mp3', 'm4a', 'aac', 'mp4', 'flac', 'ogg', 'oga', 'opus', 'webm']
+const PROJECT_EXTENSION = 'suara'
+const OPENABLE_EXTENSIONS = [...AUDIO_EXTENSIONS, PROJECT_EXTENSION]
 const MAX_OPEN_BYTES = 2 * 1024 ** 3
 const TEXT_ACTIONS: readonly TextEditAction[] = ['undo', 'redo', 'cut', 'copy', 'paste', 'delete', 'selectAll']
 
@@ -49,6 +52,7 @@ let documentState: DocumentState = {
   dirty: false,
   filePath: null,
   hasAudio: false,
+  hasLayers: false,
   hasSelection: false,
   canUndo: false,
   canRedo: false,
@@ -228,15 +232,23 @@ function registerIpc(): void {
     return { version: app.getVersion(), platform: process.platform, locale }
   })
 
-  ipcMain.handle(IpcChannel.openFile, async (event): Promise<OpenedFile | null> => {
+  ipcMain.handle(IpcChannel.openFile, async (event, kind: unknown): Promise<OpenedFile | null> => {
     const window = assertTrusted(event)
+    const audioOnly = (kind as FileKind) === 'audio'
     const result = await dialog.showOpenDialog(window, {
       defaultPath: lastDirectory ?? undefined,
       properties: ['openFile'],
-      filters: [
-        { name: t('filter.audio'), extensions: OPENABLE_EXTENSIONS },
-        { name: t('filter.all'), extensions: ['*'] }
-      ]
+      filters: audioOnly
+        ? [
+            { name: t('filter.audio'), extensions: AUDIO_EXTENSIONS },
+            { name: t('filter.all'), extensions: ['*'] }
+          ]
+        : [
+            { name: t('filter.supported'), extensions: OPENABLE_EXTENSIONS },
+            { name: t('filter.project'), extensions: [PROJECT_EXTENSION] },
+            { name: t('filter.audio'), extensions: AUDIO_EXTENSIONS },
+            { name: t('filter.all'), extensions: ['*'] }
+          ]
     })
     const path = result.filePaths[0]
     if (result.canceled || !path) return null
@@ -253,18 +265,19 @@ function registerIpc(): void {
 
   ipcMain.handle(IpcChannel.saveFile, async (event, request: unknown): Promise<SavedFile | null> => {
     const window = assertTrusted(event)
-    const { data, suggestedName, path } = (request ?? {}) as Partial<SaveRequest>
-    if (!(data instanceof ArrayBuffer) || typeof suggestedName !== 'string') {
+    const { kind, data, suggestedName, path } = (request ?? {}) as Partial<SaveRequest>
+    if (!(data instanceof ArrayBuffer) || typeof suggestedName !== 'string' || (kind !== 'audio' && kind !== 'project')) {
       throw new Error('Invalid save request')
     }
-    let target = typeof path === 'string' && knownPaths.has(path) ? path : null
+    const extension = kind === 'project' ? PROJECT_EXTENSION : 'wav'
+    let target = typeof path === 'string' && knownPaths.has(path) && extname(path).toLowerCase() === `.${extension}` ? path : null
     if (!target) {
       const result = await dialog.showSaveDialog(window, {
-        defaultPath: join(lastDirectory ?? defaultDirectory(), sanitizeFileName(suggestedName)),
-        filters: [{ name: t('filter.wav'), extensions: ['wav'] }]
+        defaultPath: join(lastDirectory ?? defaultDirectory(), sanitizeFileName(suggestedName, extension)),
+        filters: [{ name: kind === 'project' ? t('filter.project') : t('filter.wav'), extensions: [extension] }]
       })
       if (result.canceled || !result.filePath) return null
-      target = extname(result.filePath).toLowerCase() === '.wav' ? result.filePath : `${result.filePath}.wav`
+      target = extname(result.filePath).toLowerCase() === `.${extension}` ? result.filePath : `${result.filePath}.${extension}`
     }
     await writeFileAtomic(target, Buffer.from(data))
     knownPaths.add(target)
@@ -366,10 +379,10 @@ async function writeFileAtomic(path: string, data: Buffer): Promise<void> {
   }
 }
 
-function sanitizeFileName(name: string): string {
+function sanitizeFileName(name: string, extension: string): string {
   // eslint-disable-next-line no-control-regex
   const cleaned = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim()
-  return cleaned === '' || cleaned === '.wav' ? 'recording.wav' : cleaned
+  return cleaned === '' || cleaned === `.${extension}` ? `recording.${extension}` : cleaned
 }
 
 function defaultDirectory(): string {

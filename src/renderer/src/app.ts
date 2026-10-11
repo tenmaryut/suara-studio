@@ -1,16 +1,20 @@
 import {
   AudioWaveform,
-  ChevronDown,
   Circle,
+  CircleHelp,
   ClipboardPaste,
   Copy,
   Crop,
   FilePlus2,
   FolderOpen,
+  Headphones,
+  Layers,
   Maximize2,
+  Merge,
   Mic,
   Pause,
   Play,
+  Plus,
   Redo2,
   Save,
   Scissors,
@@ -18,21 +22,38 @@ import {
   Square,
   Trash2,
   Undo2,
+  Upload,
   ZoomIn,
   ZoomOut
 } from 'lucide'
+import { type EffectId, isEffectId } from '../../shared/effects'
 import type { Translate } from '../../shared/i18n'
 import type { AppInfo, MenuCommand, OpenedFile, SuaraApi, TextEditAction } from '../../shared/ipc'
-import { durationOf, frameCount } from './audio/audio-data'
+import { type AudioData, createAudioData, frameCount, sliceAudio } from './audio/audio-data'
 import { convertAudio, decodeAudioFile } from './audio/convert'
+import { peakLevel } from './audio/effects'
+import { type PlaybackLayer, Player } from './audio/player'
 import { Recorder, listMicrophones } from './audio/recorder'
-import { type WavFormat, WAV_FORMATS, isWav, readWavInfo } from './audio/wav'
-import { type ChangeKind, type EditResult, type EditorSnapshot, Editor, EditorError } from './editor/editor'
+import { type WavFormat, WAV_FORMATS, encodeWav } from './audio/wav'
+import { type EffectDefinition, type EffectValues, effectDefinition } from './effects/catalog'
+import { audibleLayers, mixLayers } from './project/mix'
+import {
+  type ChangeKind,
+  type EditResult,
+  type Layer,
+  Project,
+  ProjectError,
+  type ProjectSnapshot,
+  type Selection,
+  type StepLabel
+} from './project/project'
+import { decodeProject, encodeProject, isProjectFile } from './project/project-file'
 import { Dialogs } from './ui/dialogs'
 import { button, h, icon, isEditableTarget, setButtonIcon, setButtonText, shortcut } from './ui/dom'
+import { EffectsPanel } from './ui/effects-panel'
 import { LevelMeter } from './ui/meter'
 import { Toaster } from './ui/toast'
-import { type TimeRange, WaveformView } from './ui/waveform'
+import { TracksView } from './ui/tracks'
 import { baseName, formatClock, formatSampleRate, formatTime } from './util/format'
 
 const TEXT_EDIT_COMMANDS: Partial<Record<MenuCommand, TextEditAction>> = {
@@ -47,6 +68,9 @@ const TEXT_EDIT_COMMANDS: Partial<Record<MenuCommand, TextEditAction>> = {
 
 const STORAGE_MICROPHONE = 'suara.microphone'
 const STORAGE_WAV_FORMAT = 'suara.wavFormat'
+const STORAGE_MONITOR = 'suara.monitor'
+/** Effect previews play at most this many seconds. */
+const PREVIEW_SECONDS = 10
 
 function readStorage(key: string): string | null {
   try {
@@ -64,24 +88,29 @@ function writeStorage(key: string, value: string): void {
   }
 }
 
-/** Maps an opened WAV file to the format its data was stored in. */
-function wavFormatOf(data: ArrayBuffer): WavFormat | null {
-  if (!isWav(data)) return null
-  try {
-    const { formatTag, bitsPerSample } = readWavInfo(data)
-    if (formatTag === 3) return 'float32'
-    if (bitsPerSample === 24) return 'pcm24'
-    if (bitsPerSample === 32) return 'float32'
-    return 'pcm16'
-  } catch {
-    return null
-  }
+/** Lets the browser paint (e.g. a busy overlay) before long synchronous work. */
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)))
+}
+
+function appendSilence(audio: AudioData, frames: number): AudioData {
+  if (frames <= 0) return audio
+  return createAudioData(
+    audio.sampleRate,
+    audio.channels.map((channel) => {
+      const out = new Float32Array(channel.length + frames)
+      out.set(channel)
+      return out
+    })
+  )
 }
 
 interface Controls {
   newFile: HTMLButtonElement
   open: HTMLButtonElement
   save: HTMLButtonElement
+  help: HTMLButtonElement
+  exportAudio: HTMLButtonElement
   record: HTMLButtonElement
   play: HTMLButtonElement
   stop: HTMLButtonElement
@@ -93,21 +122,38 @@ interface Controls {
   remove: HTMLButtonElement
   trim: HTMLButtonElement
   effects: HTMLButtonElement
+  addLayer: HTMLButtonElement
+  monitor: HTMLButtonElement
   zoomIn: HTMLButtonElement
   zoomOut: HTMLButtonElement
   zoomFit: HTMLButtonElement
   microphone: HTMLSelectElement
 }
 
+interface RecordingPlan {
+  newLayer: boolean
+  /** Timeline frame where a take for a new layer starts. */
+  at: number
+}
+
+/** Where an effect will be applied. */
+interface EffectTarget {
+  layer: Layer
+  range: Selection
+}
+
 export class App {
-  private readonly editor: Editor
+  private readonly project: Project
   private readonly recorder = new Recorder()
-  private readonly waveform: WaveformView
+  private readonly player = new Player()
+  private readonly tracks: TracksView
+  private readonly effectsPanel: EffectsPanel
   private readonly dialogs: Dialogs
   private readonly toaster = new Toaster()
   private readonly meter: LevelMeter
   private readonly controls: Controls
-  private readonly effectsMenu: HTMLElement
+  private readonly title: HTMLElement
+  private readonly workspace: HTMLElement
   private readonly recordPanel: HTMLElement
   private readonly recordStatus: HTMLElement
   private readonly recordClock: HTMLElement
@@ -117,6 +163,7 @@ export class App {
   private readonly dropOverlay: HTMLElement
   private readonly busyOverlay: HTMLElement
   private readonly busyText: HTMLElement
+  private readonly hint: HTMLElement
   private readonly status: {
     position: HTMLElement
     selection: HTMLElement
@@ -124,11 +171,13 @@ export class App {
     format: HTMLElement
   }
   private wavFormat: WavFormat
-  private loadedRevision = -1
-  private viewQueue: Promise<void> = Promise.resolve()
+  private monitorEnabled: boolean
+  private recordingPlan: RecordingPlan | null = null
+  private playMode: 'timeline' | 'preview' | null = null
+  private playOrigin = 0
+  private playheadHandle = 0
   private clockHandle = 0
   private busy = false
-  private playing = false
 
   constructor(
     private readonly root: HTMLElement,
@@ -138,84 +187,79 @@ export class App {
   ) {
     const stored = readStorage(STORAGE_WAV_FORMAT) as WavFormat | null
     this.wavFormat = stored && WAV_FORMATS.includes(stored) ? stored : 'pcm16'
-    this.editor = new Editor({ convert: convertAudio })
+    this.monitorEnabled = readStorage(STORAGE_MONITOR) !== 'false'
+    this.project = new Project({ convert: convertAudio, layerName: (n) => t('layer.defaultName', { n }) })
     this.dialogs = new Dialogs(root, t)
     this.meter = new LevelMeter(t('rec.clip'))
 
     const key = (keys: string): string => shortcut(keys, info.platform)
     const tip = (label: string, keys?: string): string => (keys ? `${label} (${key(keys)})` : label)
+    const run = (command: MenuCommand) => () => this.run(command)
 
     this.controls = {
-      newFile: button({ icon: FilePlus2, title: tip(t('toolbar.new'), 'Mod+N'), onClick: () => this.run('file.new') }),
-      open: button({ icon: FolderOpen, title: tip(t('toolbar.open'), 'Mod+O'), onClick: () => this.run('file.open') }),
-      save: button({ icon: Save, title: tip(t('toolbar.save'), 'Mod+S'), onClick: () => this.run('file.save') }),
+      newFile: button({ icon: FilePlus2, title: tip(t('toolbar.new'), 'Mod+N'), onClick: run('file.new') }),
+      open: button({ icon: FolderOpen, label: t('toolbar.open'), title: tip(t('toolbar.openHint'), 'Mod+O'), onClick: run('file.open') }),
+      save: button({ icon: Save, label: t('toolbar.save'), title: tip(t('toolbar.saveHint'), 'Mod+S'), onClick: run('file.save') }),
+      help: button({ icon: CircleHelp, label: t('toolbar.help'), title: tip(t('toolbar.help'), 'F1'), onClick: run('help.guide') }),
+      exportAudio: button({
+        icon: Merge,
+        label: t('toolbar.export'),
+        title: tip(t('toolbar.exportHint'), 'Mod+E'),
+        className: 'btn-primary',
+        onClick: run('file.export')
+      }),
       record: button({
         icon: Circle,
         label: t('toolbar.record'),
-        title: tip(t('toolbar.record'), 'R'),
+        title: tip(t('toolbar.recordHint'), 'R'),
         className: 'btn-record',
-        onClick: () => this.run('transport.record')
+        onClick: run('transport.record')
       }),
-      play: button({ icon: Play, title: tip(t('toolbar.play'), 'Space'), onClick: () => this.run('transport.playPause') }),
-      stop: button({ icon: Square, title: tip(t('toolbar.stop'), 'Esc'), onClick: () => this.run('transport.stop') }),
-      undo: button({ icon: Undo2, title: tip(t('toolbar.undo'), 'Mod+Z'), onClick: () => this.run('edit.undo') }),
-      redo: button({ icon: Redo2, title: tip(t('toolbar.redo'), 'Mod+Shift+Z'), onClick: () => this.run('edit.redo') }),
-      cut: button({ icon: Scissors, title: tip(t('menu.cut'), 'Mod+X'), onClick: () => this.run('edit.cut') }),
-      copy: button({ icon: Copy, title: tip(t('menu.copy'), 'Mod+C'), onClick: () => this.run('edit.copy') }),
-      paste: button({ icon: ClipboardPaste, title: tip(t('menu.paste'), 'Mod+V'), onClick: () => this.run('edit.paste') }),
-      remove: button({ icon: Trash2, title: tip(t('menu.delete'), 'Del'), onClick: () => this.run('edit.delete') }),
-      trim: button({ icon: Crop, title: tip(t('menu.trim'), 'Mod+T'), onClick: () => this.run('edit.trim') }),
-      effects: button({
-        icon: Sparkles,
-        label: t('toolbar.effects'),
-        title: t('toolbar.effects'),
-        className: 'btn-menu',
-        onClick: () => this.toggleEffectsMenu()
-      }),
-      zoomOut: button({ icon: ZoomOut, title: tip(t('menu.zoomOut'), 'Mod+-'), onClick: () => this.run('view.zoomOut') }),
-      zoomIn: button({ icon: ZoomIn, title: tip(t('menu.zoomIn'), 'Mod+='), onClick: () => this.run('view.zoomIn') }),
-      zoomFit: button({ icon: Maximize2, title: tip(t('menu.zoomFit'), 'Mod+0'), onClick: () => this.run('view.zoomFit') }),
+      play: button({ icon: Play, label: t('toolbar.play'), title: tip(t('toolbar.play'), 'Space'), onClick: run('transport.playPause') }),
+      stop: button({ icon: Square, title: tip(t('toolbar.stop'), 'Esc'), onClick: run('transport.stop') }),
+      undo: button({ icon: Undo2, title: tip(t('toolbar.undo'), 'Mod+Z'), onClick: run('edit.undo') }),
+      redo: button({ icon: Redo2, title: tip(t('toolbar.redo'), 'Mod+Shift+Z'), onClick: run('edit.redo') }),
+      cut: button({ icon: Scissors, label: t('menu.cut'), title: tip(t('menu.cut'), 'Mod+X'), className: 'btn-secondary-label', onClick: run('edit.cut') }),
+      copy: button({ icon: Copy, label: t('menu.copy'), title: tip(t('menu.copy'), 'Mod+C'), className: 'btn-secondary-label', onClick: run('edit.copy') }),
+      paste: button({ icon: ClipboardPaste, label: t('menu.paste'), title: tip(t('menu.paste'), 'Mod+V'), className: 'btn-secondary-label', onClick: run('edit.paste') }),
+      remove: button({ icon: Trash2, label: t('menu.delete'), title: tip(t('menu.delete'), 'Del'), className: 'btn-secondary-label', onClick: run('edit.delete') }),
+      trim: button({ icon: Crop, label: t('toolbar.trim'), title: tip(t('menu.trim'), 'Mod+T'), className: 'btn-secondary-label', onClick: run('edit.trim') }),
+      effects: button({ icon: Sparkles, label: t('toolbar.effects'), title: tip(t('toolbar.effectsHint'), 'Mod+Shift+E'), className: 'btn-effects', onClick: () => this.toggleEffects() }),
+      addLayer: button({ icon: Plus, label: t('toolbar.addLayer'), title: tip(t('menu.layerAdd'), 'Mod+Shift+N'), onClick: run('layer.add') }),
+      monitor: button({ icon: Headphones, title: t('toolbar.monitor'), className: 'btn-toggle', onClick: () => this.toggleMonitor() }),
+      zoomOut: button({ icon: ZoomOut, title: tip(t('menu.zoomOut'), 'Mod+-'), onClick: run('view.zoomOut') }),
+      zoomIn: button({ icon: ZoomIn, title: tip(t('menu.zoomIn'), 'Mod+='), onClick: run('view.zoomIn') }),
+      zoomFit: button({ icon: Maximize2, title: tip(t('menu.zoomFit'), 'Mod+0'), onClick: run('view.zoomFit') }),
       microphone: h('select', { class: 'select', 'aria-label': t('toolbar.microphone'), title: t('toolbar.microphone') })
     }
-    this.controls.effects.append(icon(ChevronDown, 14))
-    this.controls.effects.setAttribute('aria-haspopup', 'menu')
     this.controls.effects.setAttribute('aria-expanded', 'false')
+    this.controls.monitor.setAttribute('aria-pressed', String(this.monitorEnabled))
     this.controls.microphone.addEventListener('change', () =>
       writeStorage(STORAGE_MICROPHONE, this.controls.microphone.value)
     )
 
-    const effectItem = (label: string, command: MenuCommand): HTMLButtonElement => {
-      const item = h('button', { type: 'button', class: 'menu-item', role: 'menuitem' }, label)
-      item.addEventListener('click', () => {
-        this.closeEffectsMenu()
-        this.run(command)
-      })
-      return item
-    }
-    this.effectsMenu = h(
-      'div',
-      { class: 'menu', role: 'menu', hidden: true },
-      effectItem(t('menu.fadeIn'), 'effect.fadeIn'),
-      effectItem(t('menu.fadeOut'), 'effect.fadeOut'),
-      effectItem(t('menu.normalize'), 'effect.normalize'),
-      effectItem(t('menu.amplify'), 'effect.amplify'),
-      effectItem(t('menu.silence'), 'effect.silence'),
-      effectItem(t('menu.reverse'), 'effect.reverse')
-    )
-
     const c = this.controls
     const group = (...children: Node[]): HTMLElement => h('div', { class: 'toolbar-group' }, ...children)
-    const toolbar = h(
+    this.title = h('span', { class: 'appbar-title' })
+    const appbar = h(
       'header',
-      { class: 'toolbar', role: 'toolbar', 'aria-label': t('app.name') },
+      { class: 'appbar' },
+      h('div', { class: 'appbar-brand' }, icon(AudioWaveform, 20), h('span', {}, t('app.name'))),
       group(c.newFile, c.open, c.save),
+      this.title,
+      h('div', { class: 'toolbar-spacer' }),
+      c.help,
+      c.exportAudio
+    )
+    const toolbar = h(
+      'div',
+      { class: 'toolbar', role: 'toolbar', 'aria-label': t('app.name') },
       group(c.record, c.play, c.stop),
       group(c.undo, c.redo),
       group(c.cut, c.copy, c.paste, c.remove, c.trim),
-      h('div', { class: 'toolbar-group menu-anchor' }, c.effects, this.effectsMenu),
-      group(c.zoomOut, c.zoomIn, c.zoomFit),
+      group(c.effects, c.addLayer),
       h('div', { class: 'toolbar-spacer' }),
-      h('label', { class: 'toolbar-group mic-picker' }, icon(Mic, 16), c.microphone)
+      h('label', { class: 'toolbar-group mic-picker' }, icon(Mic, 16), c.microphone, c.monitor)
     )
 
     this.recordStatus = h('span', { class: 'rec-status' }, t('rec.recording'))
@@ -239,15 +283,65 @@ export class App {
       )
     )
 
-    const waveformHost = h('div', { class: 'waveform', 'data-testid': 'waveform' })
-    const emptyRecord = button({ icon: Circle, label: t('toolbar.record'), title: t('toolbar.record'), className: 'btn-record btn-large', onClick: () => this.run('transport.record') })
-    const emptyOpen = button({ icon: FolderOpen, label: t('toolbar.open'), title: t('toolbar.open'), className: 'btn-large', onClick: () => this.run('file.open') })
+    this.tracks = new TracksView(
+      {
+        onActivate: (id) => this.project.setActiveLayer(id),
+        onSelection: (selection) => this.project.setSelection(selection),
+        onCursor: (frame) => {
+          this.stopPlayback(false)
+          this.project.setCursor(frame)
+        },
+        onVolumeInput: (id, volume) => this.player.setGain(id, volume),
+        onVolumeChange: (id, volume) => this.project.setLayerVolume(id, volume),
+        onMute: (id, muted) => {
+          this.project.setLayerMuted(id, muted)
+          this.restartPlayback()
+        },
+        onSolo: (id, solo) => {
+          this.project.setLayerSolo(id, solo)
+          this.restartPlayback()
+        },
+        onRename: (id, name) => this.project.renameLayer(id, name),
+        onDuplicate: (id) => this.duplicateLayer(id),
+        onRemove: (id) => this.removeLayer(id)
+      },
+      t
+    )
+    this.tracks.corner.append(c.zoomOut, c.zoomIn, c.zoomFit)
+    this.tracks.footer.append(
+      button({ icon: Plus, label: t('tracks.addEmpty'), title: tip(t('menu.layerAdd'), 'Mod+Shift+N'), className: 'btn-outline', onClick: run('layer.add') }),
+      button({ icon: Circle, label: t('tracks.recordNew'), title: tip(t('menu.layerRecord'), 'Mod+Shift+R'), className: 'btn-outline btn-record', onClick: run('layer.record') }),
+      button({ icon: Upload, label: t('tracks.import'), title: tip(t('menu.import'), 'Mod+I'), className: 'btn-outline', onClick: run('file.import') })
+    )
+
+    this.effectsPanel = new EffectsPanel(
+      {
+        onSelect: () => this.updateEffectsTarget(),
+        onPreview: (id, values) => void this.previewEffect(id, values),
+        onStopPreview: () => this.stopPreview(),
+        onApply: (id, values) => void this.applyEffect(id, values),
+        onClose: () => this.closeEffects()
+      },
+      t,
+      info.locale
+    )
+
+    const emptyRecord = button({ icon: Circle, label: t('empty.record'), title: tip(t('toolbar.record'), 'R'), className: 'btn-record btn-large', onClick: run('transport.record') })
+    const emptyOpen = button({ icon: FolderOpen, label: t('empty.open'), title: tip(t('toolbar.openHint'), 'Mod+O'), className: 'btn-large', onClick: run('file.open') })
     this.emptyState = h(
       'div',
       { class: 'empty-state' },
-      h('div', { class: 'empty-icon' }, icon(AudioWaveform, 44)),
+      h('div', { class: 'empty-icon' }, icon(Layers, 40)),
       h('h1', { class: 'empty-title' }, t('empty.title')),
+      h('p', { class: 'empty-subtitle' }, t('empty.subtitle')),
       h('div', { class: 'empty-actions' }, emptyRecord, emptyOpen),
+      h(
+        'ol',
+        { class: 'empty-steps' },
+        h('li', {}, t('empty.step1')),
+        h('li', {}, t('empty.step2')),
+        h('li', {}, t('empty.step3'))
+      ),
       h('p', { class: 'empty-hint' }, t('empty.hint')),
       h('p', { class: 'empty-formats' }, t('empty.formats'))
     )
@@ -255,6 +349,7 @@ export class App {
     this.busyText = h('span', {})
     this.busyOverlay = h('div', { class: 'busy-overlay', hidden: true }, h('div', { class: 'spinner' }), this.busyText)
 
+    this.hint = h('div', { class: 'hintbar', 'data-testid': 'hint' })
     this.status = {
       position: h('span', { class: 'status-value', 'data-testid': 'status-position' }),
       selection: h('span', { class: 'status-value', 'data-testid': 'status-selection' }),
@@ -271,22 +366,17 @@ export class App {
       this.status.format
     )
 
-    const stage = h('main', { class: 'stage' }, waveformHost, this.emptyState, this.dropOverlay, this.busyOverlay)
-    root.replaceChildren(toolbar, this.recordPanel, stage, statusbar, this.toaster.element)
+    const stage = h('main', { class: 'stage' }, this.tracks.element, this.emptyState, this.dropOverlay, this.busyOverlay)
+    this.workspace = h('div', { class: 'workspace' }, stage, this.effectsPanel.element)
+    root.replaceChildren(appbar, toolbar, this.recordPanel, this.workspace, this.hint, statusbar, this.toaster.element)
 
-    this.waveform = new WaveformView(waveformHost, {
-      onSelection: (range) => this.handleWaveformSelection(range),
-      onCursor: (time) => this.editor.setCursor(this.toFrames(time)),
-      onTime: (time) => this.handlePlaybackTime(time),
-      onPlayingChange: (playing) => this.handlePlayingChange(playing)
-    })
-
+    this.player.onEnded = () => this.handlePlaybackEnded()
     this.recorder.onLevel = (peaks) => this.meter.update(peaks)
     this.recorder.onDeviceLost = () => {
       void this.finishRecording()
       this.notify(this.t('toast.micBusy'), 'error')
     }
-    this.editor.onChange((changes) => this.render(changes))
+    this.project.onChange((changes) => this.render(changes))
     api.onMenuCommand((command) => this.run(command))
     api.onUpdateAvailable((update) =>
       this.toaster.show(this.t('toast.updateAvailable', { version: update.latestVersion }), {
@@ -297,13 +387,10 @@ export class App {
       })
     )
     window.addEventListener('keydown', (event) => this.handleKeydown(event))
-    document.addEventListener('pointerdown', (event) => {
-      if (!this.effectsMenu.hidden && !(event.target as Element).closest('.menu-anchor')) this.closeEffectsMenu()
-    })
     this.installDropTarget()
     navigator.mediaDevices?.addEventListener('devicechange', () => void this.refreshMicrophones())
     void this.refreshMicrophones()
-    this.render(new Set<ChangeKind>(['audio', 'file', 'history', 'selection', 'cursor']))
+    this.render(new Set<ChangeKind>(['audio', 'layers', 'file', 'history', 'selection', 'cursor']))
   }
 
   // ---- Commands -------------------------------------------------------------------------
@@ -321,99 +408,101 @@ export class App {
   }
 
   private async execute(command: MenuCommand): Promise<void> {
+    if (command.startsWith('effect.')) {
+      const id = command.slice('effect.'.length)
+      if (isEffectId(id)) this.openEffects(id)
+      return
+    }
     switch (command) {
       case 'file.new':
-        if (await this.confirmDiscard()) this.editor.newDocument()
+        if (await this.confirmDiscard()) {
+          this.stopPlayback(false)
+          this.project.newProject()
+        }
         return
       case 'file.open':
         return this.openFromDialog()
+      case 'file.import':
+        return this.importFromDialog()
       case 'file.save':
-        await this.save(false)
+        await this.saveProject(false)
         return
       case 'file.saveAs':
-        await this.save(true)
+        await this.saveProject(true)
         return
       case 'file.saveAndClose':
-        if (await this.save(false)) this.api.confirmClose()
+        if (await this.saveProject(false)) this.api.confirmClose()
+        return
+      case 'file.export':
+        await this.exportAudio()
         return
       case 'edit.undo':
-        this.stopPlayback()
-        this.editor.undo()
+        this.stopPlayback(false)
+        this.project.undo()
         return
       case 'edit.redo':
-        this.stopPlayback()
-        this.editor.redo()
+        this.stopPlayback(false)
+        this.project.redo()
         return
       case 'edit.cut':
-        return this.edit(() => this.editor.cut())
+        return this.edit(() => this.project.cut())
       case 'edit.copy':
-        return this.edit(() => this.editor.copy(), false)
+        return this.edit(() => this.project.copy(), false)
       case 'edit.paste':
-        return this.edit(() => this.editor.paste())
+        return this.edit(() => this.project.paste())
       case 'edit.delete':
-        return this.edit(() => this.editor.deleteSelection())
+        return this.edit(() => this.project.deleteSelection())
       case 'edit.selectAll':
-        this.editor.selectAll()
+        this.project.selectAll()
         return
       case 'edit.trim':
-        return this.edit(() => this.editor.trimToSelection())
-      case 'effect.fadeIn':
-        return this.edit(() => this.editor.fadeIn())
-      case 'effect.fadeOut':
-        return this.edit(() => this.editor.fadeOut())
-      case 'effect.silence':
-        return this.edit(() => this.editor.silence())
-      case 'effect.reverse':
-        return this.edit(() => this.editor.reverse())
-      case 'effect.normalize': {
-        if (!this.editor.hasAudio) return
-        const target = await this.dialogs.promptNumber({
-          title: this.t('dialog.normalize.title'),
-          label: this.t('dialog.normalize.label'),
-          help: this.t('dialog.normalize.help'),
-          value: -1,
-          min: -60,
-          max: 0,
-          step: 0.1
-        })
-        if (target !== null) await this.edit(() => this.editor.normalize(target))
+        return this.edit(() => this.project.trimToSelection())
+      case 'layer.add':
+        this.stopPlayback(false)
+        this.project.addLayer()
+        return
+      case 'layer.record':
+        return this.startRecording(true)
+      case 'layer.duplicate': {
+        const active = this.project.activeLayer()
+        if (active) this.duplicateLayer(active.id)
         return
       }
-      case 'effect.amplify': {
-        if (!this.editor.hasAudio) return
-        const gain = await this.dialogs.promptNumber({
-          title: this.t('dialog.amplify.title'),
-          label: this.t('dialog.amplify.label'),
-          help: this.t('dialog.amplify.help'),
-          value: 3,
-          min: -48,
-          max: 48,
-          step: 0.5
-        })
-        if (gain !== null) await this.edit(() => this.editor.amplify(gain))
+      case 'layer.remove': {
+        const active = this.project.activeLayer()
+        if (active) this.removeLayer(active.id)
         return
       }
+      case 'layer.previous':
+        return this.stepLayer(-1)
+      case 'layer.next':
+        return this.stepLayer(1)
+      case 'effects.open':
+        this.openEffects()
+        return
       case 'transport.playPause':
         return this.togglePlay()
       case 'transport.stop':
-        this.stopPlayback()
+        this.stopPlayback(true)
         return
       case 'transport.record':
         return this.toggleRecord()
       case 'view.zoomIn':
-        this.waveform.zoomIn()
+        this.tracks.zoomIn()
         return
       case 'view.zoomOut':
-        this.waveform.zoomOut()
+        this.tracks.zoomOut()
         return
       case 'view.zoomFit':
-        this.waveform.zoomToFit()
+        this.tracks.zoomToFit()
         return
+      case 'help.guide':
+        return this.showHelp()
     }
   }
 
   private async edit(action: () => EditResult | void | Promise<EditResult | void>, stopsPlayback = true): Promise<void> {
-    if (stopsPlayback) this.stopPlayback()
+    if (stopsPlayback) this.stopPlayback(false)
     try {
       const result = await action()
       if (result?.clipped) this.notify(this.t('toast.clipWarning'), 'warning')
@@ -423,52 +512,95 @@ export class App {
   }
 
   private handleError(error: unknown): void {
-    if (error instanceof EditorError) {
+    if (error instanceof ProjectError) {
       const message = {
-        'no-audio': null,
+        'no-layer': this.t('toast.noLayer'),
+        'no-audio': this.t('toast.layerEmpty'),
         'no-selection': this.t('toast.selectFirst'),
         'empty-clipboard': this.t('toast.clipboardEmpty'),
-        silent: this.t('toast.silentAudio')
+        silent: this.t('toast.silentAudio'),
+        'outside-layer': this.t('toast.outsideLayer')
       }[error.code]
-      if (message) this.notify(message, 'info')
+      this.notify(message, 'info')
       return
     }
     console.error(error)
     this.notify(error instanceof Error ? error.message : String(error), 'error')
   }
 
+  // ---- Layers ---------------------------------------------------------------------------
+
+  private duplicateLayer(id: string): void {
+    const layer = this.project.getLayer(id)
+    if (!layer) return
+    this.stopPlayback(false)
+    this.project.duplicateLayer(id, this.t('layer.copyName', { name: layer.name }))
+  }
+
+  private removeLayer(id: string): void {
+    const layer = this.project.getLayer(id)
+    if (!layer) return
+    this.stopPlayback(false)
+    this.project.removeLayer(id)
+    this.toaster.show(this.t('toast.layerRemoved', { name: layer.name }), {
+      kind: 'info',
+      dismissLabel: this.t('toast.dismiss'),
+      action: { label: this.t('toolbar.undo'), run: () => this.run('edit.undo') }
+    })
+  }
+
+  private stepLayer(delta: number): void {
+    const layers = this.project.getLayers()
+    if (layers.length === 0) return
+    const index = layers.findIndex((layer) => layer.id === this.project.activeLayer()?.id)
+    const next = layers[Math.min(Math.max(index + delta, 0), layers.length - 1)]
+    if (next) this.project.setActiveLayer(next.id)
+  }
+
   // ---- Files ----------------------------------------------------------------------------
 
   private documentName(): string {
-    return this.editor.snapshot().fileName ?? this.t('dialog.untitled')
+    return this.project.snapshot().fileName ?? this.t('dialog.untitled')
   }
 
   private async confirmDiscard(): Promise<boolean> {
-    if (!this.editor.isDirty() || !this.editor.hasAudio) return true
+    if (!this.project.isDirty() || this.project.getLayers().length === 0) return true
     const choice = await this.api.confirmDiscardChanges(this.documentName())
     if (choice === 'cancel') return false
-    if (choice === 'save') return this.save(false)
+    if (choice === 'save') return this.saveProject(false)
     return true
   }
 
   private async openFromDialog(): Promise<void> {
     if (!(await this.confirmDiscard())) return
-    const file = await this.api.openAudioFile().catch((error: unknown) => {
+    const file = await this.api.openFile('project').catch((error: unknown) => {
       this.handleError(error)
       return null
     })
     if (file) await this.openFile(file)
   }
 
+  private async importFromDialog(): Promise<void> {
+    const file = await this.api.openFile('audio').catch((error: unknown) => {
+      this.handleError(error)
+      return null
+    })
+    if (file) await this.importFile(file)
+  }
+
+  /** Opens a project, or starts a new project from an audio file. */
   private async openFile(file: OpenedFile): Promise<void> {
-    this.stopPlayback()
+    this.stopPlayback(false)
     this.setBusy(this.t('loading.opening', { name: file.name }))
     try {
-      const audio = await decodeAudioFile(file.data)
-      if (frameCount(audio) === 0) throw new Error('empty')
-      this.editor.load(audio, file.name, file.path)
-      const format = wavFormatOf(file.data)
-      if (format) this.wavFormat = format
+      if (isProjectFile(file.data)) {
+        this.project.loadProject(decodeProject(file.data), file.name, file.path)
+      } else {
+        const audio = await decodeAudioFile(file.data)
+        if (frameCount(audio) === 0) throw new Error('empty')
+        this.project.loadAudio(audio, baseName(file.name), file.name)
+      }
+      this.tracks.zoomToFit()
     } catch (error) {
       console.error(error)
       this.notify(this.t('toast.openFailed', { name: file.name }), 'error')
@@ -477,39 +609,89 @@ export class App {
     }
   }
 
-  /** Saves as WAV. Returns true when the file was written. */
-  private async save(saveAs: boolean): Promise<boolean> {
-    if (!this.editor.hasAudio) return false
-    this.stopPlayback()
-    const snapshot = this.editor.snapshot()
-    const overwritePath =
-      !saveAs && snapshot.filePath?.toLowerCase().endsWith('.wav') ? snapshot.filePath : undefined
-    let format = this.wavFormat
-    if (!overwritePath) {
-      const chosen = await this.dialogs.chooseWavFormat(this.wavFormat)
-      if (!chosen) return false
-      format = chosen
+  /** Adds an audio file as a new layer. */
+  private async importFile(file: OpenedFile): Promise<void> {
+    if (isProjectFile(file.data)) {
+      this.notify(this.t('toast.importProject'), 'info')
+      return
     }
+    this.stopPlayback(false)
+    this.setBusy(this.t('loading.opening', { name: file.name }))
+    try {
+      const audio = await decodeAudioFile(file.data)
+      if (frameCount(audio) === 0) throw new Error('empty')
+      const result = await this.project.importLayer(audio, baseName(file.name))
+      if (result.clipped) this.notify(this.t('toast.clipWarning'), 'warning')
+    } catch (error) {
+      console.error(error)
+      this.notify(this.t('toast.openFailed', { name: file.name }), 'error')
+    } finally {
+      this.setBusy(null)
+    }
+  }
+
+  /** Saves the layers as a .suara project. Returns true when the file was written. */
+  private async saveProject(saveAs: boolean): Promise<boolean> {
+    const snapshot = this.project.snapshot()
+    if (snapshot.layers.length === 0) return false
+    this.stopPlayback(false)
+    const overwritePath = !saveAs && snapshot.filePath?.toLowerCase().endsWith('.suara') ? snapshot.filePath : undefined
     this.setBusy(this.t('loading.saving'))
     try {
-      const data = this.editor.exportWav(format)
-      const saved = await this.api.saveAudioFile({
-        data,
-        suggestedName: `${baseName(this.documentName())}.wav`,
+      await nextFrame()
+      const saved = await this.api.saveFile({
+        kind: 'project',
+        data: encodeProject(this.project.toProjectData()),
+        suggestedName: `${baseName(this.documentName())}.suara`,
         path: overwritePath
       })
       if (!saved) return false
-      this.wavFormat = format
-      writeStorage(STORAGE_WAV_FORMAT, format)
-      this.editor.markSaved(saved.name, saved.path)
-      this.notify(this.t('toast.saved', { name: saved.name }), 'success')
+      this.project.markSaved(saved.name, saved.path)
+      this.notify(this.t('toast.projectSaved', { name: saved.name }), 'success')
       return true
     } catch (error) {
-      this.notify(
-        this.t('toast.saveFailed', { error: error instanceof Error ? error.message : String(error) }),
-        'error'
-      )
+      this.notify(this.t('toast.saveFailed', { error: error instanceof Error ? error.message : String(error) }), 'error')
       return false
+    } finally {
+      this.setBusy(null)
+    }
+  }
+
+  /** Merges the audible layers into one WAV file. */
+  private async exportAudio(): Promise<void> {
+    const snapshot = this.project.snapshot()
+    if (!snapshot.hasAudio) return
+    this.stopPlayback(false)
+    const audible = audibleLayers(snapshot.layers)
+    if (audible.length === 0) {
+      this.notify(this.t('toast.nothingAudible'), 'info')
+      return
+    }
+    const length = Math.max(...audible.map((layer) => frameCount(layer.audio)))
+    const silent = snapshot.layers.filter((layer) => frameCount(layer.audio) > 0).length - audible.length
+    const summary = [
+      this.t('dialog.export.summary', { count: audible.length, duration: formatTime(length / snapshot.sampleRate) }),
+      silent > 0 ? this.t('dialog.export.skipped', { count: silent }) : ''
+    ].join(' ')
+    const choice = await this.dialogs.chooseExport(this.wavFormat, summary.trim())
+    if (!choice) return
+    this.setBusy(this.t('loading.exporting'))
+    try {
+      await nextFrame()
+      const mix = mixLayers(snapshot.layers, snapshot.sampleRate, { preventClipping: choice.preventClipping })
+      const saved = await this.api.saveFile({
+        kind: 'audio',
+        data: encodeWav(mix.audio, choice.format),
+        suggestedName: `${baseName(this.documentName())}.wav`
+      })
+      if (!saved) return
+      this.wavFormat = choice.format
+      writeStorage(STORAGE_WAV_FORMAT, choice.format)
+      this.notify(this.t('toast.exported', { name: saved.name, count: mix.layerCount }), 'success')
+      if (mix.scaled) this.notify(this.t('toast.exportScaled'), 'info')
+      else if (mix.peak > 1 && choice.format !== 'float32') this.notify(this.t('toast.clipWarning'), 'warning')
+    } catch (error) {
+      this.notify(this.t('toast.saveFailed', { error: error instanceof Error ? error.message : String(error) }), 'error')
     } finally {
       this.setBusy(null)
     }
@@ -529,14 +711,23 @@ export class App {
     window.addEventListener('drop', (event) => {
       event.preventDefault()
       this.dropOverlay.hidden = true
-      const file = event.dataTransfer?.files[0]
-      if (!file || this.isRecording() || this.busy || this.dialogs.isOpen) return
+      const files = [...(event.dataTransfer?.files ?? [])]
+      if (files.length === 0 || this.isRecording() || this.busy || this.dialogs.isOpen) return
       void (async () => {
-        if (!(await this.confirmDiscard())) return
-        try {
-          await this.openFile(await this.api.openDroppedFile(file))
-        } catch {
-          this.notify(this.t('toast.openFailed', { name: file.name }), 'error')
+        for (const file of files) {
+          let opened: OpenedFile
+          try {
+            opened = await this.api.openDroppedFile(file)
+          } catch {
+            this.notify(this.t('toast.openFailed', { name: file.name }), 'error')
+            continue
+          }
+          // A project replaces everything; audio files are added as layers.
+          if (isProjectFile(opened.data)) {
+            if (await this.confirmDiscard()) await this.openFile(opened)
+          } else {
+            await this.importFile(opened)
+          }
         }
       })()
     })
@@ -544,36 +735,97 @@ export class App {
 
   // ---- Playback -------------------------------------------------------------------------
 
-  private togglePlay(): void {
-    const snapshot = this.editor.snapshot()
-    if (!snapshot.audio || frameCount(snapshot.audio) === 0) return
-    if (this.waveform.isPlaying) {
-      this.editor.setCursor(this.toFrames(this.waveform.pause()))
+  private playbackLayers(snapshot: ProjectSnapshot, exclude?: string): PlaybackLayer[] {
+    return audibleLayers(snapshot.layers)
+      .filter((layer) => layer.id !== exclude)
+      .map((layer) => ({ id: layer.id, audio: layer.audio, gain: layer.volume }))
+  }
+
+  private async togglePlay(): Promise<void> {
+    if (this.playMode === 'timeline') {
+      const position = this.player.position
+      this.stopPlayback(false)
+      this.project.setCursor(Math.round(position * this.project.getSampleRate()))
       return
     }
-    const rate = snapshot.audio.sampleRate
+    const snapshot = this.project.snapshot()
+    if (!snapshot.hasAudio) return
+    const rate = snapshot.sampleRate
+    let from = snapshot.cursor
+    let to = snapshot.length
     if (snapshot.selection) {
-      this.waveform.play(snapshot.selection.start / rate, snapshot.selection.end / rate)
-    } else {
-      const atEnd = snapshot.cursor >= frameCount(snapshot.audio) - 1
-      this.waveform.play(atEnd ? 0 : snapshot.cursor / rate)
+      from = snapshot.selection.start
+      to = snapshot.selection.end
+    } else if (from >= snapshot.length - 1) {
+      from = 0
     }
+    await this.startPlayback(this.playbackLayers(snapshot), from, to, rate)
   }
 
-  private stopPlayback(): void {
-    if (this.waveform.isPlaying) this.waveform.stop()
+  private async startPlayback(layers: PlaybackLayer[], from: number, to: number, rate: number): Promise<void> {
+    this.stopPreview()
+    if (layers.length === 0) {
+      this.notify(this.t('toast.nothingAudible'), 'info')
+      return
+    }
+    this.playOrigin = from
+    await this.player.play(layers, from / rate, to / rate)
+    this.playMode = 'timeline'
+    this.setPlayingUi(true)
+    const tick = (): void => {
+      if (this.playMode !== 'timeline') return
+      const frame = Math.round(this.player.position * rate)
+      this.tracks.setPlayhead(frame)
+      this.status.position.textContent = formatTime(this.player.position)
+      this.playheadHandle = requestAnimationFrame(tick)
+    }
+    tick()
   }
 
-  private handlePlayingChange(playing: boolean): void {
-    this.playing = playing
+  /** Restarts playback from where it is, e.g. after a layer was muted or soloed. */
+  private restartPlayback(): void {
+    if (this.playMode !== 'timeline') return
+    const snapshot = this.project.snapshot()
+    const rate = snapshot.sampleRate
+    const position = Math.round(this.player.position * rate)
+    const origin = this.playOrigin
+    const end = snapshot.selection ? snapshot.selection.end : snapshot.length
+    void this.startPlayback(this.playbackLayers(snapshot), position, end, rate).then(() => {
+      this.playOrigin = origin
+    })
+  }
+
+  /** Stops timeline playback; `returnToOrigin` puts the cursor back where playback started. */
+  private stopPlayback(returnToOrigin: boolean): void {
+    if (this.playMode !== 'timeline') return
+    this.player.stop()
+    this.playMode = null
+    cancelAnimationFrame(this.playheadHandle)
+    this.tracks.setPlayhead(null)
+    this.setPlayingUi(false)
+    if (returnToOrigin) this.project.setCursor(this.playOrigin)
+    this.updateStatus(this.project.snapshot())
+  }
+
+  private handlePlaybackEnded(): void {
+    if (this.playMode === 'preview') {
+      this.playMode = null
+      this.effectsPanel.setPreviewing(false)
+      return
+    }
+    if (this.playMode !== 'timeline') return
+    this.playMode = null
+    cancelAnimationFrame(this.playheadHandle)
+    this.tracks.setPlayhead(null)
+    this.setPlayingUi(false)
+    this.project.setCursor(this.playOrigin)
+    this.updateStatus(this.project.snapshot())
+  }
+
+  private setPlayingUi(playing: boolean): void {
     setButtonIcon(this.controls.play, playing ? Pause : Play)
-    setButtonText(this.controls.play, playing ? this.t('toolbar.pause') : this.t('toolbar.play'))
+    setButtonText(this.controls.play, playing ? this.t('toolbar.pause') : this.t('toolbar.play'), playing ? this.t('toolbar.pause') : this.t('toolbar.play'))
     this.root.classList.toggle('is-playing', playing)
-    if (!playing) this.updateStatus(this.editor.snapshot())
-  }
-
-  private handlePlaybackTime(time: number): void {
-    if (this.playing) this.status.position.textContent = formatTime(time)
   }
 
   // ---- Recording ------------------------------------------------------------------------
@@ -586,17 +838,30 @@ export class App {
     if (this.recorder.state === 'recording' || this.recorder.state === 'paused') {
       return this.finishRecording()
     }
-    if (this.recorder.state === 'idle') return this.startRecording()
+    if (this.recorder.state === 'idle') return this.startRecording(false)
   }
 
-  private async startRecording(): Promise<void> {
-    this.stopPlayback()
+  private toggleMonitor(): void {
+    this.monitorEnabled = !this.monitorEnabled
+    writeStorage(STORAGE_MONITOR, String(this.monitorEnabled))
+    this.controls.monitor.setAttribute('aria-pressed', String(this.monitorEnabled))
+  }
+
+  private async startRecording(newLayer: boolean): Promise<void> {
+    if (this.recorder.state !== 'idle') return
+    this.stopPlayback(false)
+    this.stopPreview()
     const access = await this.api.requestMicrophoneAccess()
     if (access === 'denied' || access === 'restricted') {
       this.notify(this.t('toast.micDenied'), 'error')
       return
     }
-    this.recordHint.textContent = this.recordingHint()
+    const snapshot = this.project.snapshot()
+    const active = newLayer ? null : this.project.activeLayer()
+    const at = snapshot.selection && !newLayer ? snapshot.selection.start : snapshot.cursor
+    this.recordingPlan = { newLayer: newLayer || active === null, at }
+    const monitored = this.monitorEnabled ? this.playbackLayers(snapshot, active?.id) : []
+    this.recordHint.textContent = this.recordingHint(active, at, snapshot, monitored.length > 0)
     this.recordStatus.textContent = this.t('rec.recording')
     this.recordPanel.classList.remove('is-paused')
     setButtonIcon(this.recordPause, Pause)
@@ -609,23 +874,29 @@ export class App {
     } catch (error) {
       this.recordPanel.hidden = true
       this.root.classList.remove('is-recording')
+      this.recordingPlan = null
       this.notify(this.microphoneErrorMessage(error), 'error')
-      this.updateControls(this.editor.snapshot())
+      this.render(new Set())
       return
     }
-    this.waveform.setInteractive(false)
+    if (monitored.length > 0) this.recorder.startMonitor(monitored, at / snapshot.sampleRate)
+    this.recordPause.hidden = this.recorder.isMonitoring
+    this.tracks.setInteractive(false)
     this.startClock()
-    this.updateControls(this.editor.snapshot())
-    this.syncDocumentState(this.editor.snapshot())
+    this.render(new Set())
     void this.refreshMicrophones()
   }
 
   private async finishRecording(): Promise<void> {
     if (this.recorder.state !== 'recording' && this.recorder.state !== 'paused') return
     this.stopClock()
+    const plan = this.recordingPlan
     const recording = await this.recorder.stop()
     this.endRecordingUi()
-    if (recording) await this.edit(() => this.editor.insertRecording(recording))
+    if (!recording || !plan) return
+    await this.edit(() =>
+      this.project.insertRecording(recording, plan.newLayer ? { newLayer: true, at: plan.at } : {})
+    )
   }
 
   private async discardRecording(): Promise<void> {
@@ -635,16 +906,17 @@ export class App {
   }
 
   private endRecordingUi(): void {
+    this.recordingPlan = null
     this.recordPanel.hidden = true
+    this.recordPause.hidden = false
     this.root.classList.remove('is-recording')
-    this.waveform.setInteractive(true)
+    this.tracks.setInteractive(true)
     this.meter.reset()
-    const snapshot = this.editor.snapshot()
-    this.updateControls(snapshot)
-    this.syncDocumentState(snapshot)
+    this.render(new Set())
   }
 
   private togglePauseRecording(): void {
+    if (this.recorder.isMonitoring) return
     if (this.recorder.state === 'recording') {
       this.recorder.pause()
       this.recordStatus.textContent = this.t('rec.paused')
@@ -660,16 +932,26 @@ export class App {
     }
   }
 
-  private recordingHint(): string {
-    const snapshot = this.editor.snapshot()
-    if (!snapshot.audio || frameCount(snapshot.audio) === 0) return this.t('rec.newHint')
-    if (snapshot.selection) return this.t('rec.replaceHint')
-    return this.t('rec.insertHint', { time: formatTime(snapshot.cursor / snapshot.audio.sampleRate) })
+  private recordingHint(active: Layer | null, at: number, snapshot: ProjectSnapshot, monitoring: boolean): string {
+    const time = formatTime(at / snapshot.sampleRate)
+    let text = active
+      ? snapshot.selection
+        ? this.t('rec.replaceHint', { layer: active.name })
+        : this.t('rec.intoLayer', { layer: active.name, time })
+      : this.t('rec.newLayer', { time })
+    if (monitoring) text += ` ${this.t('rec.monitoring')}`
+    return text
   }
 
   private startClock(): void {
+    const rate = this.project.getSampleRate()
     const tick = (): void => {
       this.recordClock.textContent = formatClock(this.recorder.elapsedSeconds)
+      // While the other layers play along, the playhead shows where in them the singer is.
+      const plan = this.recordingPlan
+      if (plan && this.recorder.isMonitoring) {
+        this.tracks.setPlayhead(plan.at + Math.round(this.recorder.monitorSeconds * rate))
+      }
       this.clockHandle = requestAnimationFrame(tick)
     }
     tick()
@@ -677,6 +959,7 @@ export class App {
 
   private stopClock(): void {
     cancelAnimationFrame(this.clockHandle)
+    this.tracks.setPlayhead(null)
   }
 
   private microphoneErrorMessage(error: unknown): string {
@@ -698,43 +981,179 @@ export class App {
     const wanted = select.value || readStorage(STORAGE_MICROPHONE) || ''
     const options = [h('option', { value: '' }, this.t('toolbar.defaultMicrophone'))]
     microphones.forEach((mic, index) => {
-      options.push(
-        h('option', { value: mic.deviceId }, mic.label || this.t('toolbar.microphoneN', { n: index + 1 }))
-      )
+      options.push(h('option', { value: mic.deviceId }, mic.label || this.t('toolbar.microphoneN', { n: index + 1 })))
     })
     select.replaceChildren(...options)
     select.value = microphones.some((mic) => mic.deviceId === wanted) ? wanted : ''
   }
 
-  // ---- Effects menu ---------------------------------------------------------------------
+  // ---- Effects ----------------------------------------------------------------------------
 
-  private toggleEffectsMenu(): void {
-    if (this.effectsMenu.hidden) this.openEffectsMenu()
-    else this.closeEffectsMenu()
+  private toggleEffects(): void {
+    if (this.effectsPanel.isOpen) this.closeEffects()
+    else this.openEffects()
   }
 
-  private openEffectsMenu(): void {
-    if (this.controls.effects.disabled) return
-    this.effectsMenu.hidden = false
+  private openEffects(effect?: EffectId): void {
+    this.effectsPanel.open(effect)
     this.controls.effects.setAttribute('aria-expanded', 'true')
-    this.effectsMenu.querySelector<HTMLButtonElement>('.menu-item')?.focus()
+    this.workspace.classList.add('effects-open')
+    this.updateEffectsTarget()
   }
 
-  private closeEffectsMenu(): void {
-    this.effectsMenu.hidden = true
+  private closeEffects(): void {
+    this.stopPreview()
+    this.effectsPanel.close()
     this.controls.effects.setAttribute('aria-expanded', 'false')
+    this.workspace.classList.remove('effects-open')
+  }
+
+  /** The part of the active layer an effect would change, or a reason why there is none. */
+  private effectTarget(definition: EffectDefinition | null, values?: EffectValues): EffectTarget | string {
+    const layer = this.project.activeLayer()
+    if (!layer || !this.project.hasAudio) return this.t('effects.target.none')
+    const length = frameCount(layer.audio)
+    if (length === 0) return this.t('effects.target.emptyLayer', { layer: layer.name })
+    const selection = this.project.getSelection()
+    const rate = this.project.getSampleRate()
+    if (selection) {
+      const start = Math.min(selection.start, length)
+      const end = Math.min(selection.end, length)
+      if (end <= start) return this.t('effects.target.outside', { layer: layer.name })
+      return { layer, range: { start, end } }
+    }
+    const duration = Math.round((values?.duration ?? 2) * rate)
+    if (definition?.defaultRange === 'start') return { layer, range: { start: 0, end: Math.min(length, duration) } }
+    if (definition?.defaultRange === 'end') return { layer, range: { start: Math.max(0, length - duration), end: length } }
+    return { layer, range: { start: 0, end: length } }
+  }
+
+  private updateEffectsTarget(): void {
+    if (!this.effectsPanel.isOpen) return
+    const id = this.effectsPanel.effect
+    const definition = id ? effectDefinition(id) : null
+    const target = this.effectTarget(definition)
+    if (typeof target === 'string') {
+      this.effectsPanel.setTarget(target, false)
+      return
+    }
+    const rate = this.project.getSampleRate()
+    const { layer, range } = target
+    const text = this.project.getSelection()
+      ? this.t('effects.target.selection', {
+          layer: layer.name,
+          start: formatTime(range.start / rate),
+          end: formatTime(range.end / rate)
+        })
+      : definition?.defaultRange === 'start'
+        ? this.t('effects.target.start', { layer: layer.name })
+        : definition?.defaultRange === 'end'
+          ? this.t('effects.target.end', { layer: layer.name })
+          : this.t('effects.target.layer', { layer: layer.name })
+    this.effectsPanel.setTarget(text, !this.isRecording())
+  }
+
+  private async previewEffect(id: EffectId, values: EffectValues): Promise<void> {
+    const definition = effectDefinition(id)
+    const target = this.effectTarget(definition, values)
+    if (typeof target === 'string') {
+      this.notify(target, 'info')
+      return
+    }
+    this.stopPlayback(false)
+    const rate = this.project.getSampleRate()
+    const { layer, range } = target
+    const end = Math.min(range.end, range.start + PREVIEW_SECONDS * rate)
+    let segment = sliceAudio(layer.audio, range.start, end)
+    const tail = Math.round(definition.tailSeconds(values) * rate)
+    if (tail > 0) segment = appendSilence(segment, Math.min(tail, 3 * rate))
+    let processed: AudioData
+    try {
+      processed = definition.process(segment, values)
+    } catch (error) {
+      this.handleError(error)
+      return
+    }
+    await this.player.play([{ id: 'preview', audio: processed, gain: layer.volume }], 0, frameCount(processed) / rate)
+    this.playMode = 'preview'
+    this.effectsPanel.setPreviewing(true)
+  }
+
+  private stopPreview(): void {
+    if (this.playMode !== 'preview') return
+    this.player.stop()
+    this.playMode = null
+    this.effectsPanel.setPreviewing(false)
+  }
+
+  private async applyEffect(id: EffectId, values: EffectValues): Promise<void> {
+    if (this.busy || this.isRecording()) return
+    const definition = effectDefinition(id)
+    const target = this.effectTarget(definition, values)
+    if (typeof target === 'string') {
+      this.notify(target, 'info')
+      return
+    }
+    this.stopPreview()
+    this.stopPlayback(false)
+    const { layer, range } = target
+    if (definition.needsSound && peakLevel(sliceAudio(layer.audio, range.start, range.end)) === 0) {
+      this.notify(this.t('toast.silentAudio'), 'info')
+      return
+    }
+    const name = this.t(`fx.${id}.name`)
+    this.setBusy(this.t('loading.effect', { name }))
+    try {
+      await nextFrame()
+      const rate = this.project.getSampleRate()
+      const result = this.project.applyEffect(id, (segment) => definition.process(segment, values), {
+        range,
+        tailFrames: Math.round(definition.tailSeconds(values) * rate)
+      })
+      this.toaster.show(this.t('toast.effectApplied', { name, layer: layer.name }), {
+        kind: 'success',
+        dismissLabel: this.t('toast.dismiss'),
+        action: { label: this.t('toolbar.undo'), run: () => this.run('edit.undo') }
+      })
+      if (result.clipped) this.notify(this.t('toast.clipWarning'), 'warning')
+    } catch (error) {
+      this.handleError(error)
+    } finally {
+      this.setBusy(null)
+    }
+  }
+
+  // ---- Help -------------------------------------------------------------------------------
+
+  private async showHelp(): Promise<void> {
+    const t = this.t
+    const key = (keys: string): string => shortcut(keys, this.info.platform)
+    await this.dialogs.showHelp(
+      t('help.title'),
+      [1, 2, 3, 4, 5].map((n) => ({
+        title: t(`help.step${n as 1 | 2 | 3 | 4 | 5}.title`),
+        text: t(`help.step${n as 1 | 2 | 3 | 4 | 5}.text`)
+      })),
+      [
+        { keys: t('key.space'), action: t('help.key.play') },
+        { keys: 'R', action: t('help.key.record') },
+        { keys: `${t('key.delete')}`, action: t('help.key.delete') },
+        { keys: `${key('Mod+Z')} / ${key('Mod+Shift+Z')}`, action: t('help.key.undo') },
+        { keys: `${key('Mod+X')} · ${key('Mod+C')} · ${key('Mod+V')}`, action: t('help.key.clipboard') },
+        { keys: key('Mod+A'), action: t('help.key.selectAll') },
+        { keys: '↑ / ↓', action: t('help.key.layers') },
+        { keys: '← / →', action: t('help.key.move') },
+        { keys: `${key('Mod+')}${t('key.scroll')}`, action: t('help.key.zoom') },
+        { keys: key('Mod+S'), action: t('help.key.save') },
+        { keys: key('Mod+E'), action: t('help.key.export') }
+      ]
+    )
   }
 
   // ---- Keyboard -------------------------------------------------------------------------
 
   private handleKeydown(event: KeyboardEvent): void {
     if (event.defaultPrevented || event.isComposing || this.dialogs.isOpen) return
-    if (event.key === 'Escape' && !this.effectsMenu.hidden) {
-      event.preventDefault()
-      this.closeEffectsMenu()
-      this.controls.effects.focus()
-      return
-    }
     if (isEditableTarget(event.target)) return
     // Keyboard users activate a focused button with Space or Enter as usual.
     if (event.target instanceof HTMLButtonElement && (event.key === ' ' || event.key === 'Enter')) return
@@ -761,71 +1180,79 @@ export class App {
         event.preventDefault()
         this.run('edit.delete')
         return
-      case 'Home':
+      case 'ArrowUp':
         event.preventDefault()
-        if (!this.isRecording()) this.editor.setCursor(0)
+        this.run('layer.previous')
         return
-      case 'End': {
+      case 'ArrowDown':
         event.preventDefault()
-        const audio = this.editor.getAudio()
-        if (audio && !this.isRecording()) this.editor.setCursor(frameCount(audio))
+        this.run('layer.next')
+        return
+      case 'ArrowLeft':
+      case 'ArrowRight': {
+        if (this.isRecording() || !this.project.hasAudio) return
+        event.preventDefault()
+        const rate = this.project.getSampleRate()
+        const step = (event.shiftKey ? 0.1 : 1) * rate * (event.key === 'ArrowLeft' ? -1 : 1)
+        this.stopPlayback(false)
+        this.project.setSelection(null)
+        this.project.setCursor(this.project.getCursor() + step)
         return
       }
+      case 'Home':
+        event.preventDefault()
+        if (!this.isRecording()) this.project.setCursor(0)
+        return
+      case 'End':
+        event.preventDefault()
+        if (!this.isRecording()) this.project.setCursor(this.project.length())
+        return
       case 'Escape':
-        if (this.waveform.isPlaying) this.stopPlayback()
-        else this.editor.setSelection(null)
+        if (this.playMode === 'timeline') this.stopPlayback(true)
+        else if (this.playMode === 'preview') this.stopPreview()
+        else if (this.project.getSelection()) this.project.setSelection(null)
+        else if (this.effectsPanel.isOpen) this.closeEffects()
         return
     }
   }
 
   // ---- Rendering ------------------------------------------------------------------------
 
-  private toFrames(seconds: number): number {
-    const audio = this.editor.getAudio()
-    return audio ? Math.round(seconds * audio.sampleRate) : 0
-  }
-
-  private handleWaveformSelection(range: TimeRange | null): void {
-    this.editor.setSelection(range ? { start: this.toFrames(range.start), end: this.toFrames(range.end) } : null)
-  }
-
   private render(changes: ReadonlySet<ChangeKind>): void {
-    const snapshot = this.editor.snapshot()
-    if (changes.has('audio') && snapshot.audioRevision !== this.loadedRevision) {
-      this.loadedRevision = snapshot.audioRevision
-      const audio = snapshot.audio
-      this.viewQueue = this.viewQueue
-        .then(() => this.waveform.load(audio))
-        .catch((error: unknown) => this.handleError(error))
-        .then(() => this.applyViewState())
-    } else if (changes.has('selection') || changes.has('cursor')) {
-      this.viewQueue = this.viewQueue.then(() => this.applyViewState())
-    }
+    const snapshot = this.project.snapshot()
+    if (changes.has('audio') || changes.has('layers')) this.stopPreview()
+    this.tracks.update({
+      layers: snapshot.layers,
+      activeId: snapshot.activeLayerId,
+      sampleRate: snapshot.sampleRate,
+      length: snapshot.length,
+      selection: snapshot.selection,
+      cursor: snapshot.cursor
+    })
     this.updateControls(snapshot)
     this.updateStatus(snapshot)
+    this.updateHint(snapshot)
+    this.updateEffectsTarget()
     this.syncDocumentState(snapshot)
   }
 
-  /** Pushes the editor's selection and cursor into the waveform. */
-  private applyViewState(): void {
-    const snapshot = this.editor.snapshot()
-    const audio = snapshot.audio
-    if (!audio || frameCount(audio) === 0) return
-    const rate = audio.sampleRate
-    this.waveform.setSelection(
-      snapshot.selection ? { start: snapshot.selection.start / rate, end: snapshot.selection.end / rate } : null
-    )
-    this.waveform.setCursor(snapshot.cursor / rate)
+  private stepName(label: StepLabel | undefined): string | null {
+    if (!label) return null
+    if (label.kind === 'effect' && label.detail && isEffectId(label.detail)) return this.t(`fx.${label.detail}.name`)
+    return this.t(`edit.${label.kind}`)
   }
 
-  private updateControls(snapshot: EditorSnapshot): void {
+  private updateControls(snapshot: ProjectSnapshot): void {
     const c = this.controls
-    const hasAudio = snapshot.audio !== null && frameCount(snapshot.audio) > 0
+    const hasAudio = snapshot.hasAudio
+    const hasLayers = snapshot.layers.length > 0
     const recording = this.isRecording()
     const idle = !recording && !this.busy
-    c.save.disabled = !hasAudio || !idle
+    c.save.disabled = !hasLayers || !idle
+    c.exportAudio.disabled = !hasAudio || !idle
     c.newFile.disabled = !idle
     c.open.disabled = !idle
+    c.help.disabled = recording
     c.play.disabled = !hasAudio || !idle
     c.stop.disabled = !hasAudio || !idle
     c.undo.disabled = !snapshot.canUndo || !idle
@@ -836,34 +1263,35 @@ export class App {
     c.trim.disabled = !snapshot.selection || !idle
     c.paste.disabled = !snapshot.hasClipboard || !idle
     c.effects.disabled = !hasAudio || !idle
+    c.addLayer.disabled = !idle
     c.zoomIn.disabled = !hasAudio
     c.zoomOut.disabled = !hasAudio
     c.zoomFit.disabled = !hasAudio
     c.microphone.disabled = recording
-    if (c.effects.disabled) this.closeEffectsMenu()
+    c.monitor.disabled = recording
+    if (!hasAudio && this.effectsPanel.isOpen) this.closeEffects()
 
-    const undoName = snapshot.undoKind ? this.t(`edit.${snapshot.undoKind}`) : null
-    const redoName = snapshot.redoKind ? this.t(`edit.${snapshot.redoKind}`) : null
+    const undoName = this.stepName(snapshot.undoLabel)
+    const redoName = this.stepName(snapshot.redoLabel)
     setButtonText(c.undo, undoName ? this.t('toolbar.undoAction', { action: undoName }) : this.t('toolbar.undo'))
     setButtonText(c.redo, redoName ? this.t('toolbar.redoAction', { action: redoName }) : this.t('toolbar.redo'))
 
     setButtonIcon(c.record, recording ? Square : Circle)
     setButtonText(
       c.record,
-      recording ? this.t('toolbar.stopRecording') : this.t('toolbar.record'),
+      recording ? this.t('toolbar.stopRecording') : this.t('toolbar.recordHint'),
       recording ? this.t('rec.stop') : this.t('toolbar.record')
     )
     c.record.classList.toggle('is-active', recording)
 
-    this.emptyState.hidden = hasAudio || recording
-    this.root.classList.toggle('has-audio', hasAudio)
+    this.emptyState.hidden = hasLayers || recording
+    this.root.classList.toggle('has-layers', hasLayers)
+    this.title.textContent = `${this.documentName()}${snapshot.dirty && hasLayers ? ' •' : ''}`
   }
 
-  private updateStatus(snapshot: EditorSnapshot): void {
-    const audio = snapshot.audio
-    const hasAudio = audio !== null && frameCount(audio) > 0
-    const rate = audio?.sampleRate ?? 48000
-    if (!this.playing) this.status.position.textContent = formatTime(snapshot.cursor / rate)
+  private updateStatus(snapshot: ProjectSnapshot): void {
+    const rate = snapshot.sampleRate
+    if (this.playMode !== 'timeline') this.status.position.textContent = formatTime(snapshot.cursor / rate)
     if (snapshot.selection) {
       const start = snapshot.selection.start / rate
       const end = snapshot.selection.end / rate
@@ -871,23 +1299,32 @@ export class App {
     } else {
       this.status.selection.textContent = '—'
     }
-    if (hasAudio && audio) {
-      const channels =
-        audio.channels.length === 1
-          ? this.t('status.mono')
-          : audio.channels.length === 2
-            ? this.t('status.stereo')
-            : this.t('status.channels', { n: audio.channels.length })
-      this.status.format.textContent = `${formatSampleRate(audio.sampleRate)} · ${channels} · ${formatTime(durationOf(audio))}`
-    } else {
-      this.status.format.textContent = ''
-    }
-    this.status.dirty.hidden = !(snapshot.dirty && hasAudio)
+    const layers = snapshot.layers.length
+    this.status.format.textContent =
+      layers > 0
+        ? `${formatSampleRate(rate)} · ${this.t(layers === 1 ? 'status.layer' : 'status.layers', { count: layers })} · ${formatTime(snapshot.length / rate)}`
+        : ''
+    this.status.dirty.hidden = !(snapshot.dirty && layers > 0)
   }
 
-  private syncDocumentState(snapshot: EditorSnapshot): void {
-    const hasAudio = snapshot.audio !== null && frameCount(snapshot.audio) > 0
-    const dirty = snapshot.dirty && hasAudio
+  private updateHint(snapshot: ProjectSnapshot): void {
+    const active = snapshot.layers.find((layer) => layer.id === snapshot.activeLayerId)
+    const text = this.isRecording()
+      ? this.t('hint.recording')
+      : snapshot.layers.length === 0
+        ? ''
+        : !active || frameCount(active.audio) === 0
+          ? this.t('hint.emptyLayer')
+          : snapshot.selection
+            ? this.t('hint.selection', { layer: active.name })
+            : this.t('hint.default', { layer: active.name })
+    this.hint.textContent = text
+    this.hint.hidden = text === ''
+  }
+
+  private syncDocumentState(snapshot: ProjectSnapshot): void {
+    const hasLayers = snapshot.layers.length > 0
+    const dirty = snapshot.dirty && hasLayers
     const name = this.documentName()
     document.title = `${name}${dirty ? ' •' : ''} — ${this.t('app.name')}`
     const idle = !this.isRecording()
@@ -895,7 +1332,8 @@ export class App {
       title: name,
       dirty,
       filePath: snapshot.filePath,
-      hasAudio,
+      hasAudio: snapshot.hasAudio,
+      hasLayers,
       hasSelection: snapshot.selection !== null,
       canUndo: snapshot.canUndo && idle,
       canRedo: snapshot.canRedo && idle,
@@ -908,7 +1346,7 @@ export class App {
     this.busy = message !== null
     this.busyOverlay.hidden = message === null
     this.busyText.textContent = message ?? ''
-    this.updateControls(this.editor.snapshot())
+    this.updateControls(this.project.snapshot())
   }
 
   private notify(message: string, kind: 'info' | 'success' | 'warning' | 'error'): void {

@@ -11,9 +11,9 @@ function subscribe<T>(channel: string, listener: (value: T) => void): () => void
 
 const api: SuaraApi = {
   getAppInfo: () => ipcRenderer.invoke(IpcChannel.appInfo),
-  openAudioFile: () => ipcRenderer.invoke(IpcChannel.openFile),
+  openFile: (kind) => ipcRenderer.invoke(IpcChannel.openFile, kind),
   openDroppedFile: (file) => ipcRenderer.invoke(IpcChannel.openDroppedFile, webUtils.getPathForFile(file)),
-  saveAudioFile: (request) => ipcRenderer.invoke(IpcChannel.saveFile, request),
+  saveFile: (request) => ipcRenderer.invoke(IpcChannel.saveFile, request),
   requestMicrophoneAccess: () => ipcRenderer.invoke(IpcChannel.requestMic),
   confirmDiscardChanges: (documentName) => ipcRenderer.invoke(IpcChannel.confirmDiscard, documentName),
   setDocumentState: (state) => ipcRenderer.send(IpcChannel.documentState, state),

@@ -1,5 +1,6 @@
 import { Menu, type MenuItemConstructorOptions, app, shell } from 'electron'
 import { ISSUES_URL, REPO_URL } from '../shared/app-info'
+import { EFFECTS, EFFECT_CATEGORIES } from '../shared/effects'
 import type { MessageKey, Translate } from '../shared/i18n'
 import type { DocumentState, MenuCommand } from '../shared/ipc'
 
@@ -13,14 +14,17 @@ type Rule = (state: DocumentState) => boolean
 
 const idle: Rule = (s) => !s.isRecording
 const withAudio: Rule = (s) => idle(s) && s.hasAudio
+const withLayers: Rule = (s) => idle(s) && s.hasLayers
 const withSelection: Rule = (s) => idle(s) && s.hasSelection
 
 /** Enabled-state rules for menu items, keyed by MenuCommand (also used as the item id). */
 const RULES: Partial<Record<MenuCommand, Rule>> = {
   'file.new': idle,
   'file.open': idle,
-  'file.save': withAudio,
-  'file.saveAs': withAudio,
+  'file.import': idle,
+  'file.save': withLayers,
+  'file.saveAs': withLayers,
+  'file.export': withAudio,
   'edit.undo': (s) => s.canUndo,
   'edit.redo': (s) => s.canRedo,
   'edit.cut': withSelection,
@@ -29,12 +33,14 @@ const RULES: Partial<Record<MenuCommand, Rule>> = {
   'edit.delete': withSelection,
   'edit.selectAll': withAudio,
   'edit.trim': withSelection,
-  'effect.fadeIn': withAudio,
-  'effect.fadeOut': withAudio,
-  'effect.normalize': withAudio,
-  'effect.amplify': withAudio,
-  'effect.silence': withAudio,
-  'effect.reverse': withAudio,
+  'layer.add': idle,
+  'layer.record': idle,
+  'layer.duplicate': withLayers,
+  'layer.remove': withLayers,
+  'layer.previous': withLayers,
+  'layer.next': withLayers,
+  'effects.open': withAudio,
+  ...Object.fromEntries(EFFECTS.map((effect) => [`effect.${effect.id}`, withAudio])),
   'transport.playPause': withAudio,
   'transport.stop': withAudio,
   'view.zoomIn': (s) => s.hasAudio,
@@ -56,6 +62,14 @@ export function buildMenu(t: Translate, handlers: MenuHandlers, devTools: boolea
     click: () => handlers.command(command)
   })
   const separator: MenuItemConstructorOptions = { type: 'separator' }
+
+  const effectItems: MenuItemConstructorOptions[] = [item('menu.effectsPanel', 'effects.open', 'CmdOrCtrl+Shift+E')]
+  for (const category of EFFECT_CATEGORIES) {
+    effectItems.push(separator)
+    for (const effect of EFFECTS.filter((candidate) => candidate.category === category)) {
+      effectItems.push(item(`fx.${effect.id}.name`, `effect.${effect.id}`))
+    }
+  }
 
   const template: MenuItemConstructorOptions[] = []
   if (isMac) {
@@ -81,9 +95,12 @@ export function buildMenu(t: Translate, handlers: MenuHandlers, devTools: boolea
       submenu: [
         item('menu.new', 'file.new', 'CmdOrCtrl+N'),
         item('menu.open', 'file.open', 'CmdOrCtrl+O'),
+        item('menu.import', 'file.import', 'CmdOrCtrl+I'),
         separator,
         item('menu.save', 'file.save', 'CmdOrCtrl+S'),
         item('menu.saveAs', 'file.saveAs', 'Shift+CmdOrCtrl+S'),
+        separator,
+        item('menu.export', 'file.export', 'CmdOrCtrl+E'),
         ...(isMac ? [] : [separator, { role: 'quit', label: t('menu.quit') } as MenuItemConstructorOptions])
       ]
     },
@@ -103,17 +120,23 @@ export function buildMenu(t: Translate, handlers: MenuHandlers, devTools: boolea
       ]
     },
     {
-      label: t('menu.effects'),
+      label: t('menu.layer'),
       submenu: [
-        item('menu.fadeIn', 'effect.fadeIn'),
-        item('menu.fadeOut', 'effect.fadeOut'),
+        item('menu.layerAdd', 'layer.add', 'Shift+CmdOrCtrl+N'),
+        item('menu.layerRecord', 'layer.record', 'Shift+CmdOrCtrl+R'),
+        item('menu.import', 'file.import'),
         separator,
-        item('menu.normalize', 'effect.normalize'),
-        item('menu.amplify', 'effect.amplify'),
+        item('menu.layerDuplicate', 'layer.duplicate', 'CmdOrCtrl+D'),
+        item('menu.layerRemove', 'layer.remove'),
         separator,
-        item('menu.silence', 'effect.silence'),
-        item('menu.reverse', 'effect.reverse')
+        // Up and Down arrows also work in the page.
+        item('menu.layerPrevious', 'layer.previous'),
+        item('menu.layerNext', 'layer.next')
       ]
+    },
+    {
+      label: t('menu.effects'),
+      submenu: effectItems
     },
     {
       label: t('menu.controls'),
@@ -143,6 +166,8 @@ export function buildMenu(t: Translate, handlers: MenuHandlers, devTools: boolea
       role: 'help',
       label: t('menu.help'),
       submenu: [
+        { ...item('menu.guide', 'help.guide', 'F1'), enabled: true },
+        separator,
         { label: t('menu.website'), click: () => void shell.openExternal(REPO_URL) },
         { label: t('menu.reportIssue'), click: () => void shell.openExternal(ISSUES_URL) },
         ...(isMac

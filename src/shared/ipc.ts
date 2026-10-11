@@ -1,3 +1,4 @@
+import type { EffectId } from './effects'
 import type { Locale } from './i18n'
 
 export const IpcChannel = {
@@ -18,9 +19,11 @@ export const IpcChannel = {
 export type MenuCommand =
   | 'file.new'
   | 'file.open'
+  | 'file.import'
   | 'file.save'
   | 'file.saveAs'
   | 'file.saveAndClose'
+  | 'file.export'
   | 'edit.undo'
   | 'edit.redo'
   | 'edit.cut'
@@ -29,18 +32,21 @@ export type MenuCommand =
   | 'edit.delete'
   | 'edit.selectAll'
   | 'edit.trim'
-  | 'effect.fadeIn'
-  | 'effect.fadeOut'
-  | 'effect.normalize'
-  | 'effect.amplify'
-  | 'effect.silence'
-  | 'effect.reverse'
+  | 'layer.add'
+  | 'layer.record'
+  | 'layer.duplicate'
+  | 'layer.remove'
+  | 'layer.previous'
+  | 'layer.next'
+  | 'effects.open'
+  | `effect.${EffectId}`
   | 'transport.playPause'
   | 'transport.stop'
   | 'transport.record'
   | 'view.zoomIn'
   | 'view.zoomOut'
   | 'view.zoomFit'
+  | 'help.guide'
 
 export type TextEditAction = 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'delete' | 'selectAll'
 
@@ -56,7 +62,11 @@ export interface OpenedFile {
   data: ArrayBuffer
 }
 
+/** Which files an open or save dialog offers: projects and audio, or audio only. */
+export type FileKind = 'project' | 'audio'
+
 export interface SaveRequest {
+  kind: FileKind
   data: ArrayBuffer
   suggestedName: string
   /** Overwrite this path without asking. Only honoured for paths the user opened or saved earlier. */
@@ -78,6 +88,7 @@ export interface DocumentState {
   dirty: boolean
   filePath: string | null
   hasAudio: boolean
+  hasLayers: boolean
   hasSelection: boolean
   canUndo: boolean
   canRedo: boolean
@@ -93,9 +104,10 @@ export interface UpdateInfo {
 
 export interface SuaraApi {
   getAppInfo(): Promise<AppInfo>
-  openAudioFile(): Promise<OpenedFile | null>
+  /** Shows an open dialog; 'project' offers projects and audio files, 'audio' audio files only. */
+  openFile(kind: FileKind): Promise<OpenedFile | null>
   openDroppedFile(file: File): Promise<OpenedFile>
-  saveAudioFile(request: SaveRequest): Promise<SavedFile | null>
+  saveFile(request: SaveRequest): Promise<SavedFile | null>
   requestMicrophoneAccess(): Promise<MicAccess>
   confirmDiscardChanges(documentName: string): Promise<DiscardChoice>
   setDocumentState(state: DocumentState): void
