@@ -38,9 +38,9 @@ test('the installed app starts, opens audio and records', async () => {
     await app.evaluate(({ dialog }, filePath) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] })
     }, source)
-    await page.locator('.toolbar button[title^="Open"]').click()
-    await expect(page.getByTestId('status-format')).toHaveText('22.05 kHz · Mono · 0:01.000')
-    await expect(page.locator('[data-testid="waveform"][data-state="ready"]')).toBeVisible()
+    await page.locator('.appbar button[title^="Open"]').click()
+    await expect(page.getByTestId('status-format')).toHaveText('22.05 kHz · 1 layer · 0:01.000')
+    await expect(page.locator('.track-row')).toHaveCount(1)
 
     if (isLinux) {
       await page.locator('.toolbar .btn-record').click()

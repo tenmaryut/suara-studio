@@ -47,8 +47,8 @@ describe('i18n', () => {
 
   it('fills in parameters', () => {
     const t = createTranslator('id')
-    expect(t('toast.saved', { name: 'take.wav' })).toBe('take.wav tersimpan')
-    expect(t('dialog.invalidNumber', { min: -60 })).toBe('Masukkan angka antara -60 dan {max}.')
+    expect(t('toast.projectSaved', { name: 'lagu.suara' })).toBe('Proyek tersimpan: lagu.suara')
+    expect(t('dialog.export.summary', { count: 2 })).toBe('2 layer akan digabung menjadi satu file WAV ({duration}).')
   })
 })
 

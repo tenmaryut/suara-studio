@@ -5,6 +5,8 @@ declare abstract class AudioWorkletProcessor {
   readonly port: MessagePort
   constructor(options?: unknown)
 }
+/** Frame index (in the AudioContext's timeline) of the first sample of the current block. */
+declare const currentFrame: number
 declare function registerProcessor(
   name: string,
   processor: new (options: ProcessorOptions) => AudioWorkletProcessor
@@ -18,6 +20,8 @@ export interface ChunkMessage {
   type: 'chunk'
   channels: Float32Array[]
   peaks: number[]
+  /** Context frame of the chunk's first sample, used to line takes up with playback. */
+  startFrame: number
 }
 
 export interface FlushedMessage {
@@ -30,6 +34,7 @@ class SuaraRecorderProcessor extends AudioWorkletProcessor {
   private buffers: Float32Array[]
   private peaks: number[]
   private filled = 0
+  private chunkStart = 0
 
   constructor(options: ProcessorOptions) {
     super()
@@ -51,6 +56,7 @@ class SuaraRecorderProcessor extends AudioWorkletProcessor {
     const frames = input[0]!.length
     let read = 0
     while (read < frames) {
+      if (this.filled === 0) this.chunkStart = currentFrame + read
       const count = Math.min(frames - read, this.chunkFrames - this.filled)
       for (let c = 0; c < this.channelCount; c++) {
         const source = input[c] ?? input[0]!
@@ -81,7 +87,7 @@ class SuaraRecorderProcessor extends AudioWorkletProcessor {
       this.filled === this.chunkFrames
         ? this.buffers
         : this.buffers.map((buffer) => buffer.slice(0, this.filled))
-    const message: ChunkMessage = { type: 'chunk', channels, peaks: this.peaks }
+    const message: ChunkMessage = { type: 'chunk', channels, peaks: this.peaks, startFrame: this.chunkStart }
     this.port.postMessage(
       message,
       channels.map((channel) => channel.buffer as ArrayBuffer)

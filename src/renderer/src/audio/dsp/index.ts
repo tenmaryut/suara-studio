@@ -1,0 +1,7 @@
+export { echo, type EchoOptions } from './delay'
+export { compress, noiseGate, type CompressorOptions, type GateOptions } from './dynamics'
+export { applyFilters, type BiquadSpec, type BiquadType } from './filters'
+export { ringModulate, tremolo, type RingModOptions, type TremoloOptions } from './modulation'
+export { reverb, type ReverbOptions } from './reverb'
+export { truncateSilence, type TruncateSilenceOptions } from './silence'
+export { changeSpeed } from './speed'
